@@ -226,8 +226,15 @@ def find_transcripts(root: str = None, project: str = None) -> list:
     return sorted(glob.glob(pat))
 
 
-def parse(path: str) -> Session:
-    """Account for one transcript. Never raises on a malformed line."""
+def parse(path: str, usage_only: bool = False) -> Session:
+    """Account for one transcript. Never raises on a malformed line.
+
+    ``usage_only`` skips all content accounting and keeps only the billed
+    usage records. `ts now` needs nothing else, and it runs in a statusline
+    where a tokenizer pass over a multi-megabyte transcript on every prompt
+    render would be felt. With tiktoken installed the difference is roughly
+    two orders of magnitude; with the estimator it is still worth having.
+    """
     s = Session(path=path,
                 project=os.path.basename(os.path.dirname(path)),
                 session_id=os.path.basename(path)[:-6])
@@ -255,10 +262,14 @@ def parse(path: str) -> Session:
             kind = rec.get("type")
 
             if kind == "attachment":
-                _bump(s.buckets, BUCKET_ATTACH, toks(json.dumps(rec.get("attachment"), default=str)))
+                if not usage_only:
+                    _bump(s.buckets, BUCKET_ATTACH,
+                          toks(json.dumps(rec.get("attachment"), default=str)))
                 continue
             if kind == "system":
-                _bump(s.buckets, BUCKET_SYSTEM, toks(json.dumps(rec.get("message") or rec, default=str)))
+                if not usage_only:
+                    _bump(s.buckets, BUCKET_SYSTEM,
+                          toks(json.dumps(rec.get("message") or rec, default=str)))
                 continue
             if kind not in ("assistant", "user"):
                 continue
@@ -280,7 +291,7 @@ def parse(path: str) -> Session:
                     ctx = cr + cw + ip
                     if ctx:
                         s.ctx_sizes.append(ctx)
-                if isinstance(content, list):
+                if isinstance(content, list) and not usage_only:
                     for b in content:
                         if not isinstance(b, dict):
                             continue
@@ -303,6 +314,8 @@ def parse(path: str) -> Session:
                 continue
 
             # user record
+            if usage_only:
+                continue
             if isinstance(content, str):
                 _bump(s.buckets, BUCKET_USER, toks(content))
                 continue

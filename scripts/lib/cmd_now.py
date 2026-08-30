@@ -219,7 +219,9 @@ def main(argv=None) -> int:
         sys.stderr.write("no transcript found; pass --session PATH\n")
         return 1
 
-    sess = parse(path)
+    # Content accounting is not used by anything below, and this runs in a
+    # statusline. Read the usage records only.
+    sess = parse(path, usage_only=True)
     if not sess.turns:
         if args.statusline:
             return 0
