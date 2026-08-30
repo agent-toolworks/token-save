@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import statistics
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -55,20 +54,29 @@ def newest_transcript() -> str:
 
 
 def growth_per_turn(sess: Session, window: int = DEFAULT_WINDOW) -> float:
-    """Median context added per turn over the recent window.
+    """Context added per turn: the net change across the window, over its length.
 
-    Median rather than mean: a single 30K file read inside the window would
-    otherwise triple the reported rate and produce a projection nobody should
-    believe.
+    Not the median of the per-turn deltas, which was the first attempt and read
+    a flat 0 on a session visibly growing by ~424 tokens a turn. Context does
+    not grow smoothly: the prompt only jumps when a cache breakpoint moves, so
+    roughly half of all deltas are exactly zero and the median of a
+    zero-inflated distribution is zero no matter how fast the session grows.
+
+    Net-over-window is the honest reading of "per turn" and is robust for the
+    reason the median was chosen in the first place: one 30K read is amortised
+    across the whole window instead of dominating it.
+
+    Clamped at zero because a compaction moves the context sharply down, and a
+    negative growth rate would make the projection below meaningless.
     """
     sizes = sess.ctx_sizes
     if len(sizes) < 3:
         return 0.0
     recent = sizes[-(window + 1):]
-    deltas = [b - a for a, b in zip(recent, recent[1:]) if b >= a]
-    if not deltas:
+    span = len(recent) - 1
+    if span <= 0:
         return 0.0
-    return float(statistics.median(deltas))
+    return max(0.0, (recent[-1] - recent[0]) / float(span))
 
 
 def breakeven_turns(context: int, floor: int) -> float:
@@ -122,7 +130,7 @@ def render(a: dict) -> str:
     out.append(R.kv("context now", colour("{:,} tokens".format(a["context"])), note))
     out.append(R.kv("preamble", "{:,} tokens".format(a["floor"])))
     out.append(R.kv("growth", "+{:,.0f} tokens/turn".format(a["growth_per_turn"]),
-                    "median of the last %d turns" % DEFAULT_WINDOW))
+                    "net over the last %d turns" % DEFAULT_WINDOW))
     out.append("")
     out.append(R.kv("billed so far", "{:,} cache reads".format(a["cache_read"]),
                     "{:s} cost units".format(human(a["cost_units"]))))

@@ -199,10 +199,12 @@ after=$(cat "$CLAUDE_CONFIG_DIR/settings.json")
   || bad "unparseable settings.json was overwritten"
 
 # ---------------------------------------------------------------------------
-head_ "4. VERSIONS  (three places that must agree)"
+head_ "4. VERSIONS  (four places that must agree)"
 # ---------------------------------------------------------------------------
-# The CLI, the plugin manifest and the git tag are read by different consumers
-# and drift silently. A v0.2.0 tag once pointed at a manifest saying 0.1.0.
+# The CLI, the plugin manifest, this repo's own marketplace entry and the git
+# tag are read by four different consumers and drift silently. A v0.2.0 tag
+# once pointed at a manifest saying 0.1.0; the marketplace entry then sat at
+# 0.1.0 against a 0.3.0 manifest until `claude plugin validate` said so.
 vres=$(python3 - "$ROOT" <<'VERCHK'
 import json, os, re, subprocess, sys
 root = sys.argv[1]
@@ -211,6 +213,16 @@ manifest = json.load(open(os.path.join(root, ".claude-plugin", "plugin.json")))[
 cli = re.search(r'TS_VERSION="([^"]+)"', open(os.path.join(root, "scripts", "ts")).read()).group(1)
 if manifest != cli:
     bad.append("plugin.json %s != scripts/ts %s" % (manifest, cli))
+# This repo is also its own marketplace, for people who add it directly rather
+# than through the org catalogue. That entry drifted once and `claude plugin
+# validate` caught it when this check did not -- so it is checked here too,
+# where it runs without the CLI installed.
+mkt = os.path.join(root, ".claude-plugin", "marketplace.json")
+if os.path.isfile(mkt):
+    for entry in json.load(open(mkt)).get("plugins", []):
+        if entry.get("version") and entry["version"] != manifest:
+            bad.append("marketplace.json entry %r is %s but plugin.json says %s"
+                       % (entry.get("name"), entry["version"], manifest))
 # Only compare against a tag when the tree is clean. Mid-release the
 # manifest is already bumped while HEAD still carries the PREVIOUS tag,
 # and a check that fails during the normal release flow is a check people
@@ -335,6 +347,32 @@ if [[ $be == None ]]; then
   ok "ts now: a session at its preamble reports no gain from clearing"
 else
   bad "ts now: expected null break-even at the preamble, got $be"
+fi
+
+# Growth must survive a zero-inflated series. Context only jumps when a cache
+# breakpoint moves, so roughly half of all real deltas are exactly zero -- and
+# the median of that reads 0 on a session growing steadily. This fixture
+# alternates 0 / +1000 across 20 turns: true growth is 500/turn.
+burst="$TMP/burst/proj/burst.jsonl"
+mkdir -p "$(dirname "$burst")"
+python3 - "$burst" <<'MKBURST'
+import json, sys
+recs, ctx = [], 10000
+for i in range(21):
+    recs.append({"type": "assistant", "message": {"role": "assistant", "content": [],
+        "usage": {"input_tokens": 0, "cache_creation_input_tokens": 0,
+                  "cache_read_input_tokens": ctx, "output_tokens": 10}}})
+    ctx += 1000 if i % 2 else 0
+with open(sys.argv[1], "w") as fh:
+    for r in recs:
+        fh.write(json.dumps(r) + "\n")
+MKBURST
+g=$(timeout 30 "$TS" now --session "$burst" --json 2>/dev/null \
+    | python3 -c 'import json,sys;print(int(round(json.load(sys.stdin)["growth_per_turn"])))')
+if [[ $g == 500 ]]; then
+  ok "ts now: growth survives a zero-inflated series (500/turn, not 0)"
+else
+  bad "ts now: growth on a bursty series was $g, expected 500"
 fi
 
 # --statusline runs inside a prompt: it must never hang, never write to stderr
