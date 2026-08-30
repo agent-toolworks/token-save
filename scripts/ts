@@ -19,7 +19,7 @@ done
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 LIB="$ROOT/scripts/lib"
 
-TS_VERSION="0.9.0"
+TS_VERSION="0.9.1"
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
@@ -47,10 +47,17 @@ COMMANDS
   version          Print the version.
 
 COMMON OPTIONS  (audit, advise)
-  --project GLOB   Only sessions under this project directory.
+  --project=GLOB   Only sessions under this project directory. Write it with
+                   the "=". Claude Code project directories begin with "-",
+                   so the space-separated form is read as another flag and
+                   exits 2.
   --limit N        Only the N most recent sessions.
   --root DIR       Transcript root (default ~/.claude/projects).
   --json           Machine-readable output.
+
+ADVISE OPTIONS
+  --all            Also list the detectors that stayed silent.
+  --only ID        Run a single detector by id.
 
 START HERE
   ts audit                 # the numbers

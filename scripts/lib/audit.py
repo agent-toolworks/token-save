@@ -270,7 +270,7 @@ def _as_json(fleet: Fleet) -> str:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="ts audit", description=__doc__)
-    ap.add_argument("--project", help="only this project directory (glob)")
+    ap.add_argument("--project", help="only this project directory (glob). Use the --project=NAME form: Claude Code project dirs begin with '-', which argparse reads as a flag")
     ap.add_argument("--limit", type=int, help="only the N most recent sessions")
     ap.add_argument("--sessions", action="store_true", help="per-session table")
     ap.add_argument("--json", action="store_true", help="machine-readable output")

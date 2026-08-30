@@ -75,7 +75,7 @@ def _render(findings, fleet, show_all: bool) -> None:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="ts advise", description=__doc__)
-    ap.add_argument("--project", help="only this project directory (glob)")
+    ap.add_argument("--project", help="only this project directory (glob). Use the --project=NAME form: Claude Code project dirs begin with '-', which argparse reads as a flag")
     ap.add_argument("--limit", type=int, help="only the N most recent sessions")
     ap.add_argument("--root", help="transcript root")
     ap.add_argument("--all", action="store_true",
