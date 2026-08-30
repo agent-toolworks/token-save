@@ -79,8 +79,16 @@ Expected values live in `fixtures/EXPECTATIONS.json` and are **derived by
 hand**, with the arithmetic written into `_derivation`. Do not paste in
 whatever the program printed — that only proves the program is deterministic.
 
-If you add a detector, add a fixture profile that makes it fire and assert that
-it stays silent on the profiles where it should not.
+If you add a detector, add a fixture profile that makes it fire. This is
+enforced, not requested: `verify` compares `advise.CATALOGUE` against the
+profiles that fired and fails on anything covered by neither a fixture nor the
+explicit exemption list. Add your profile to `fixtures/build-detector-fixtures`
+and its name to the loop in section 4 of `scripts/verify`.
+
+The one standing exemption is `mcp-schema`, which keys off machine
+configuration rather than a transcript, so no fixture fleet can reach it. If
+your detector needs an exemption too, say why in the same place — an exemption
+a reader can see is a different thing from a gap nobody noticed.
 
 ## Style
 

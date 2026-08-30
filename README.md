@@ -219,11 +219,14 @@ reduce tokens?" from general knowledge, which is close to a coin flip.
 scripts/verify
 ```
 
-Twelve checks in three groups: arithmetic against hand-derived expectations in
-`fixtures/EXPECTATIONS.json` (not recorded from program output — a self-test
-that records its own output tests nothing), routing across the two opposite
-fleets, and safety, including that an unparseable `settings.json` is refused
-rather than overwritten.
+Twenty-seven checks in seven groups: arithmetic against hand-derived
+expectations in `fixtures/EXPECTATIONS.json` (not recorded from program output
+— a self-test that records its own output tests nothing), routing across the
+two opposite fleets, detector coverage (every entry in the catalogue must have
+a fixture that fires it, or a named exemption), version agreement, redaction
+against a planted canary, the live signal's arithmetic, and safety — including
+that an unparseable `settings.json` is refused rather than overwritten and that
+the statusline cannot hang.
 
 ## Licence
 

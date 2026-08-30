@@ -215,7 +215,50 @@ after=$(cat "$CLAUDE_CONFIG_DIR/settings.json")
   || bad "unparseable settings.json was overwritten"
 
 # ---------------------------------------------------------------------------
-head_ "4. VERSIONS  (four places that must agree)"
+head_ "4. DETECTOR COVERAGE  (every detector has something that fires it)"
+# ---------------------------------------------------------------------------
+# CONTRIBUTING asks a contributor to add a fixture that makes their detector
+# fire. That is only fair if the existing ones are held to the same bar, so
+# this fails when a detector in CATALOGUE has no profile covering it.
+"$FIX/build-detector-fixtures" --out "$TMP" >/dev/null 2>&1 || true
+declare -a covered=()
+for prof in verbose:output-verbosity thinking:thinking attachments:attachments \
+            images:images rereads:repeat-reads; do
+  name=${prof%%:*}; want=${prof##*:}
+  got=$(bounded 60 "$TS" advise --root "$TMP/$name" --json 2>/dev/null \
+        | python3 -c 'import json,sys;print(",".join(f["id"] for f in json.load(sys.stdin)["findings"]))' 2>/dev/null)
+  if [[ ",$got," == *",$want,"* ]]; then
+    ok "fixture '$name' fires $want"
+    covered+=("$want")
+  else
+    bad "fixture '$name' did not fire $want" "fired: ${got:-nothing}"
+  fi
+done
+
+# chatter/bulk cover the two Bash detectors and both cover preamble and
+# session-length, which every long fixture trips.
+covered+=(bash-chatter bash-bulk preamble session-length)
+# mcp-schema depends on machine configuration (a custom base URL with tool
+# deferral off), not on a transcript, so no fixture fleet can reach it. Named
+# here rather than silently skipped, so the exemption is visible and has to be
+# justified when someone reads this.
+exempt=(mcp-schema)
+uncovered=$(python3 - "${covered[*]}" "${exempt[*]}" "$ROOT" <<'COV'
+import sys, os
+sys.path.insert(0, os.path.join(sys.argv[3], "scripts", "lib"))
+import advise
+have = set(sys.argv[1].split()) | set(sys.argv[2].split())
+print(" ".join(sorted(set(advise.CATALOGUE) - have)))
+COV
+)
+if [[ -z $uncovered ]]; then
+  ok "every detector in CATALOGUE is covered or explicitly exempt"
+else
+  bad "detectors with no fixture and no exemption" "$uncovered"
+fi
+
+# ---------------------------------------------------------------------------
+head_ "5. VERSIONS  (four places that must agree)"
 # ---------------------------------------------------------------------------
 # The CLI, the plugin manifest, this repo's own marketplace entry and the git
 # tag are read by four different consumers and drift silently. A v0.2.0 tag
@@ -262,7 +305,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-head_ "5. REDACTION  (ts share must leak nothing)"
+head_ "6. REDACTION  (ts share must leak nothing)"
 # ---------------------------------------------------------------------------
 # A profile is meant to be sent to a stranger, so this plants identifying
 # strings everywhere a transcript can carry them and asserts none survive.
@@ -312,7 +355,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-head_ "6. LIVE SIGNAL  (ts now)"
+head_ "7. LIVE SIGNAL  (ts now)"
 # ---------------------------------------------------------------------------
 # Hand-derived, like the rest. Note the context of a turn is read+write+input
 # -- the whole prompt that request paid for -- not the read alone. The bulk

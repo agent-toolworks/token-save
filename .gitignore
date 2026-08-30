@@ -9,3 +9,8 @@ __pycache__/
 *.pyc
 .DS_Store
 .idea/
+fixtures/verbose/
+fixtures/thinking/
+fixtures/attachments/
+fixtures/images/
+fixtures/rereads/
