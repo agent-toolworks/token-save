@@ -62,6 +62,7 @@ Nothing is sent anywhere. There is no network code in this repository.
 | ...and what did *not* apply | `ts advise --all` |
 | What can be changed mechanically? | `ts fixes list` |
 | Preview / apply / undo one | `ts fixes show\|apply\|revert <id>` |
+| Send my numbers to someone, safely | `ts share` |
 
 `--json` on `audit`, `advise` and `doctor` for machine-readable output.
 
@@ -124,6 +125,29 @@ everyone has not read anything.
 Full catalogue: `preamble`, `session-length`, `bash-chatter`, `bash-bulk`,
 `output-verbosity`, `mcp-schema`, `repeat-reads`, `images`, `thinking`,
 `attachments`.
+
+## Sharing your numbers
+
+Every threshold here was calibrated against **one machine**. That is the
+tool's biggest weakness, and the only cure is other people's numbers.
+
+```sh
+ts share --show      # read it first
+ts share             # writes ts-profile.json
+```
+
+The profile is shape only: distributions, counts, ratios, and which detectors
+fired. It contains no file paths, no project or session names, no commands, no
+tool arguments or results, no MCP server names, and no file contents. The
+redaction is a whitelist — a field that is not named cannot appear — and
+`scripts/verify` plants a canary through paths, commands, results and MCP tool
+names, then fails if any of it survives.
+
+A typical profile is about 3KB.
+
+If you run this and the advice looks wrong for your machine, that is the most
+useful bug report this project can get. Two of the ten detectors have never
+fired on real data.
 
 ## Two kinds of number, never mixed
 

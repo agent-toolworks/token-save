@@ -19,7 +19,7 @@ done
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 LIB="$ROOT/scripts/lib"
 
-TS_VERSION="0.2.0"
+TS_VERSION="0.3.0"
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
@@ -42,6 +42,8 @@ COMMANDS
   doctor           What is installed and configured on this machine.
   advise           Run every detector against your numbers; rank what fires.
   fixes            list | show <id> | apply <id> [--yes] | revert <id>
+  share            A profile of this machine safe to send to someone else:
+                   shape only, no paths, names, commands or contents.
   version          Print the version.
 
 COMMON OPTIONS  (audit, advise)
@@ -101,6 +103,10 @@ case "$cmd" in
   fixes)
     have_python || die "ts: python3 is required and was not found on PATH"
     exec python3 "$LIB/fixes.py" "$@"
+    ;;
+  share)
+    have_python || die "ts: python3 is required and was not found on PATH"
+    exec python3 "$LIB/cmd_share.py" "$@"
     ;;
   *)
     die "ts: unknown command '$cmd' (try: ts --help)"

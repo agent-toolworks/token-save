@@ -226,7 +226,57 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-head_ "5. LIVE SIGNAL  (ts now)"
+head_ "5. REDACTION  (ts share must leak nothing)"
+# ---------------------------------------------------------------------------
+# A profile is meant to be sent to a stranger, so this plants identifying
+# strings everywhere a transcript can carry them and asserts none survive.
+# Spot-checking one machine's output proves nothing; a planted canary does.
+leakdir="$TMP/leak/proj-CANARYPROJECT"
+mkdir -p "$leakdir"
+python3 - "$leakdir/CANARYSESSION.jsonl" <<'MKLEAK'
+import json, sys
+C = "CANARY7f3a"   # must not appear anywhere in the shared profile
+u = {"input_tokens": 0, "cache_creation_input_tokens": 5000,
+     "cache_read_input_tokens": 10000, "output_tokens": 50}
+recs = []
+for i in range(8):
+    recs.append({"type": "assistant", "message": {"role": "assistant", "usage": u,
+        "content": [{"type": "tool_use", "id": "t%d" % i, "name": "Bash",
+                     "input": {"command": "cat /home/%s/secret_%s.txt" % (C, C)}}]}})
+    recs.append({"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t%d" % i,
+         "content": "contents of %s and more %s" % (C, C)}]}})
+    recs.append({"type": "assistant", "message": {"role": "assistant", "usage": u,
+        "content": [{"type": "tool_use", "id": "r%d" % i, "name": "Read",
+                     "input": {"file_path": "/home/%s/%s.py" % (C, C)}}]}})
+    recs.append({"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "r%d" % i, "content": C * 200}]}})
+    recs.append({"type": "assistant", "message": {"role": "assistant", "usage": u,
+        "content": [{"type": "tool_use", "id": "m%d" % i,
+                     "name": "mcp__%s__dothing" % C, "input": {"q": C}}]}})
+    recs.append({"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "m%d" % i, "content": C}]}})
+with open(sys.argv[1], "w") as fh:
+    for r in recs:
+        fh.write(json.dumps(r) + "\n")
+MKLEAK
+
+if timeout 90 "$TS" share --root "$TMP/leak" --show >"$TMP/share.json" 2>"$TMP/share.err"; then
+  hits=$(grep -o "CANARY7f3a\|CANARYPROJECT\|CANARYSESSION" "$TMP/share.json" | sort -u | tr '\n' ' ')
+  if [[ -z $hits ]]; then
+    ok "ts share: planted paths, commands, results and MCP names all redacted"
+  else
+    bad "ts share LEAKED identifying data" "found: $hits"
+  fi
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$TMP/share.json" 2>/dev/null \
+    && ok "ts share: emits valid JSON" \
+    || bad "ts share: output is not valid JSON"
+else
+  bad "ts share failed" "$(head -3 "$TMP/share.err")"
+fi
+
+# ---------------------------------------------------------------------------
+head_ "6. LIVE SIGNAL  (ts now)"
 # ---------------------------------------------------------------------------
 # Hand-derived, like the rest. Note the context of a turn is read+write+input
 # -- the whole prompt that request paid for -- not the read alone. The bulk

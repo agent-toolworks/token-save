@@ -54,6 +54,7 @@ Every recommendation `ts advise` makes is ranked by this, not by raw size.
 | What should I actually change? | `ts advise` |
 | ...including what did NOT fire | `ts advise --all` |
 | What can be changed mechanically? | `ts fixes list` |
+| Share my numbers with someone safely | `ts share` |
 | Preview one | `ts fixes show terse-output` |
 | Apply it (backs up, reversible) | `ts fixes apply terse-output --yes` |
 | Undo it | `ts fixes revert terse-output` |
