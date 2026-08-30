@@ -1,6 +1,5 @@
 {
   "_why": "Hand-derived from fixtures/build-fixtures, NOT recorded from program output. A self-test that records what the code printed only proves the code is deterministic. Each number below is reproducible with arithmetic shown in _derivation.",
-
   "chatter": {
     "_derivation": {
       "turns": "3 sessions x 120 Bash calls = 360 assistant turns",
@@ -24,10 +23,13 @@
       "out_p90": 100,
       "out_max": 100
     },
-    "fires": ["bash-chatter"],
-    "silent": ["bash-bulk"]
+    "fires": [
+      "bash-chatter"
+    ],
+    "silent": [
+      "bash-bulk"
+    ]
   },
-
   "bulk": {
     "_derivation": {
       "turns": "3 sessions x 12 Bash calls = 36 assistant turns",
@@ -50,7 +52,28 @@
       "out_p90": 20000,
       "out_max": 20000
     },
-    "fires": ["bash-bulk"],
-    "silent": ["bash-chatter"]
+    "fires": [
+      "bash-bulk"
+    ],
+    "silent": [
+      "bash-chatter"
+    ]
+  },
+  "split": {
+    "_derivation": {
+      "shape": "5 assistant MESSAGES, each written as 3 transcript LINES, as the real format does",
+      "turns": "5 messages -- NOT 15 lines",
+      "cache_read": "10,000 per message x 5 = 50,000; identical on all 3 lines, counted once",
+      "cache_write": "500 per message x 5 = 2,500; likewise counted once",
+      "output": "300 per message x 5 = 1,500; lines carry 1,1,300 -- the MAX, not the sum (1,510) and not the first (5)",
+      "why": "Counting per line gave 15 turns and ~3x every billed figure. No hand-built fixture had this shape."
+    },
+    "turns": 5,
+    "billed": {
+      "cache_read": 50000,
+      "cache_write": 2500,
+      "input": 0,
+      "output": 1500
+    }
   }
 }

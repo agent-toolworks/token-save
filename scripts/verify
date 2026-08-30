@@ -60,7 +60,7 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 head_ "1. ARITHMETIC  (against hand-derived expectations)"
 # ---------------------------------------------------------------------------
-for fleet in chatter bulk; do
+for fleet in chatter bulk split; do
   out="$TMP/$fleet.json"
   if ! "$TS" audit --root "$TMP/$fleet" --json >"$out" 2>"$TMP/$fleet.err"; then
     bad "$fleet: audit --json failed" "$(head -3 "$TMP/$fleet.err")"
@@ -76,7 +76,7 @@ if got["turns"] != exp["turns"]:
 for k, v in exp["billed"].items():
     if got["billed"].get(k) != v:
         bad.append("billed.%s %s != %s" % (k, got["billed"].get(k), v))
-for k, v in exp["bash"].items():
+for k, v in exp.get("bash", {}).items():
     g = got["bash"].get(k)
     # Content sizes are tokenizer-dependent; allow 5% on those, exact on counts.
     if k in ("calls",):
@@ -93,6 +93,30 @@ PY
     bad "$fleet: expectation mismatch" "${result//|/$'\n        '}"
   fi
 done
+
+# The two halves of the per-message rule need different treatment, and getting
+# either wrong is silent: summing inputs multiplies every billed figure, and
+# taking the FIRST output truncates it to a streaming partial.
+splitchk=$(python3 - "$TMP/split.json" <<'SPLIT'
+import json, sys
+d = json.load(open(sys.argv[1]))
+b = d["billed"]
+bad = []
+if d["turns"] != 5:
+    bad.append("turns %s != 5 (counted lines, not messages)" % d["turns"])
+if b["cache_read"] != 50000:
+    bad.append("cache_read %s != 50000 (inputs summed across lines)" % b["cache_read"])
+if b["output"] == 1510:
+    bad.append("output summed the streaming partials")
+elif b["output"] == 5:
+    bad.append("output took the first line, truncating to a partial")
+elif b["output"] != 1500:
+    bad.append("output %s != 1500" % b["output"])
+print("|".join(bad))
+SPLIT
+)
+[[ -z $splitchk ]] && ok "usage counted once per message: inputs once, output max" \
+                   || bad "per-message usage rule broken" "${splitchk//|/$'\n        '}"
 
 # Amplification is the headline metric, so it gets its own check rather than
 # riding along inside a bundle where a wrong value could hide.

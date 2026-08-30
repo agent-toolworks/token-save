@@ -63,9 +63,29 @@ def rec_user_text(s):
     return {"type": "user", "message": {"role": "user", "content": s}}
 
 
-def rec_assistant(usage, blocks):
-    return {"type": "assistant",
-            "message": {"role": "assistant", "content": blocks, "usage": usage}}
+def rec_assistant(usage, blocks, mid=None):
+    m = {"role": "assistant", "content": blocks, "usage": usage}
+    if mid:
+        m["id"] = mid
+    return {"type": "assistant", "message": m}
+
+
+def rec_assistant_split(usage, block_lists, mid):
+    """One MESSAGE written as several transcript LINES, as the real format does.
+
+    Every line repeats the same usage object, inputs byte-identical and
+    output_tokens growing to the total on the last line. Counting per line
+    inflated every billed figure by the number of content blocks -- 1.86x on
+    one machine, 2.19x on another -- and no hand-built fixture had this shape,
+    so nothing caught it.
+    """
+    out, n = [], len(block_lists)
+    for i, blocks in enumerate(block_lists):
+        u = dict(usage)
+        # Partial on every line but the last; the last carries the total.
+        u["output_tokens"] = usage["output_tokens"] if i == n - 1 else 1
+        out.append(rec_assistant(u, blocks, mid=mid))
+    return out
 
 
 def rec_tool_result(tuid, body):
@@ -118,13 +138,34 @@ def bulk_session(idx: int, calls: int = 12):
     return recs
 
 
+def split_session():
+    """One session of 5 messages, each split across 3 lines.
+
+    Correct totals, by hand: 5 messages x (cache_read 10,000, cache_write 500,
+    output 300). Counting per line would give 15 turns and 3x every figure.
+    """
+    recs = [rec_user_text(text_of(20))]
+    for i in range(5):
+        recs.extend(rec_assistant_split(
+            usage(10000, 500, 300),
+            [[{"type": "text", "text": text_of(10)}],
+             [{"type": "tool_use", "id": "s%d_a" % i, "name": "Bash",
+               "input": {"command": "echo a"}}],
+             [{"type": "tool_use", "id": "s%d_b" % i, "name": "Bash",
+               "input": {"command": "echo b"}}]],
+            mid="msg_%d" % i))
+        recs.append(rec_tool_result("s%d_a" % i, text_of(50)))
+        recs.append(rec_tool_result("s%d_b" % i, text_of(50)))
+    return recs
+
+
 def main(argv=None) -> int:
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=here)
     args = ap.parse_args(argv)
 
-    for name in ("chatter", "bulk"):
+    for name in ("chatter", "bulk", "split"):
         d = os.path.join(args.out, name)
         if os.path.isdir(d):
             shutil.rmtree(d)
@@ -135,10 +176,12 @@ def main(argv=None) -> int:
     for i in range(3):
         write(os.path.join(args.out, "bulk", "proj-bulk",
                            "session-%d.jsonl" % i), bulk_session(i))
+    write(os.path.join(args.out, "split", "proj-split", "s.jsonl"), split_session())
 
     print("wrote fixtures under %s" % args.out)
     print("  chatter/  3 sessions x 120 Bash calls, ~100 token outputs")
     print("  bulk/     3 sessions x  12 Bash calls, ~20,000 token outputs")
+    print("  split/    5 messages x 3 transcript lines each (the real format)")
     return 0
 
 

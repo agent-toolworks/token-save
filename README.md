@@ -7,7 +7,7 @@ from *your* numbers instead of someone else's.
 
 On the first real machine this was run against, **98% of every token billed was
 a cache read** — the same content, re-read on the next turn, and the next. Each
-token of content created was billed **646 times**.
+token of content created was billed **355 times**; on a second machine, 132×.
 
 That number is the whole point. Most token-saving advice assumes the cost is
 the size of what you send. It usually is not. The cost is how long it stays.
@@ -23,11 +23,11 @@ and it is measurably the wrong priority on many machines:
 
 - A compressor cannot touch the **fixed preamble** — system prompt, tool
   schemas, memory files — which is re-read on *every* turn. On the machine
-  above that was 10.3% of all cache reads, from 24,781 tokens of text.
+  above that was 10.3% of all cache reads, from 24,748 tokens of text.
 - A compressor cannot touch **command text**. On that machine the Bash commands
   cost 79% of what their output cost. Half the surface, invisible to every tool
   that only looks at results.
-- A compressor cannot shorten a **260-turn session** whose context grew from
+- A compressor cannot shorten a **173-turn session** whose context grew from
   27K to 716K, and session length is superlinear: every turn re-reads all the
   turns before it.
 - And where outputs are small — a median of 113 tokens — there is simply
@@ -164,6 +164,18 @@ A typical profile is about 3KB.
 If you run this and the advice looks wrong for your machine, that is the most
 useful bug report this project can get. Two of the ten detectors have never
 fired on real data.
+
+### The amplification figure varies by machine, and by version
+
+Two machines measured 355× and 132×. The thesis holds at both — persistence
+beats size either way — but the factor is largely a function of how long
+sessions run before a clear, which is a habit rather than a property of the
+tool. Do not read one machine's figure as a constant.
+
+It also changed twice as bugs were fixed, both times **downward**: recursive
+discovery added denominator (subagent transcripts), and per-message usage
+accounting removed inflated numerator. A figure from before v0.9.0 is not
+comparable with one after it.
 
 ## Two kinds of number, never mixed
 

@@ -269,6 +269,21 @@ def is_subagent_path(path: str, root: str) -> bool:
     return len(rel.split(os.sep)) > 2
 
 
+def _flush_usage(sess: "Session", usage: dict) -> None:
+    """Apply one MESSAGE's usage to a session. See the note in parse()."""
+    cr = usage.get("cache_read_input_tokens") or 0
+    cw = usage.get("cache_creation_input_tokens") or 0
+    ip = usage.get("input_tokens") or 0
+    sess.turns += 1
+    sess.billed["cache_read"] += cr
+    sess.billed["cache_write"] += cw
+    sess.billed["input"] += ip
+    sess.billed["output"] += usage.get("output_tokens") or 0
+    ctx = cr + cw + ip
+    if ctx:
+        sess.ctx_sizes.append(ctx)
+
+
 def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
     """Account for one transcript. Never raises on a malformed line.
 
@@ -289,6 +304,8 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
         pass
     id2name = {}
     id2input = {}
+    pending = None      # (message id, usage) for the message being read
+    line_no = 0
 
     try:
         fh = open(path, "r", errors="replace")
@@ -297,6 +314,7 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
 
     with fh:
         for line in fh:
+            line_no += 1
             line = line.strip()
             if not line:
                 continue
@@ -325,17 +343,43 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
             if kind == "assistant":
                 usage = msg.get("usage") or {}
                 if usage:
-                    s.turns += 1
-                    cr = usage.get("cache_read_input_tokens") or 0
-                    cw = usage.get("cache_creation_input_tokens") or 0
-                    ip = usage.get("input_tokens") or 0
-                    s.billed["cache_read"] += cr
-                    s.billed["cache_write"] += cw
-                    s.billed["input"] += ip
-                    s.billed["output"] += usage.get("output_tokens") or 0
-                    ctx = cr + cw + ip
-                    if ctx:
-                        s.ctx_sizes.append(ctx)
+                    # One assistant MESSAGE is written as several transcript
+                    # LINES -- roughly one per content block -- and every line
+                    # repeats the same usage object. Accumulating per line
+                    # counted each message once per block: measured at 1.86
+                    # lines per message on one machine and 2.19 on another,
+                    # so every billed figure was ~2x too high and every
+                    # per-turn figure with it.
+                    #
+                    # The two halves need different rules, which is why this
+                    # is not simply "take the first":
+                    #   inputs  -- byte-identical on every line of a message
+                    #              (100% of multi-line messages, both corpora),
+                    #              so count them ONCE.
+                    #   output  -- non-decreasing across lines, the last line
+                    #              carrying the total, so take the MAX. Taking
+                    #              the first truncates output to a partial.
+                    #
+                    # Content blocks are NOT duplicated (3,240 of 3,243
+                    # multi-line messages carry a distinct slice per line), so
+                    # content accounting below stays per line and is correct.
+                    mid = msg.get("id")
+                    if not mid:
+                        # No id: keep the line as its own message rather than
+                        # collapsing unrelated lines together. Over-counting a
+                        # rare unkeyed line is the safer direction.
+                        mid = "\x00line-%d" % line_no
+                    if pending is not None and pending[0] != mid:
+                        _flush_usage(s, pending[1])
+                        pending = None
+                    if pending is None:
+                        pending = (mid, dict(usage))
+                    else:
+                        # Same message continued: inputs already held, output
+                        # advances.
+                        prev = pending[1]
+                        if (usage.get("output_tokens") or 0) > (prev.get("output_tokens") or 0):
+                            prev["output_tokens"] = usage.get("output_tokens") or 0
                 if isinstance(content, list) and not usage_only:
                     for b in content:
                         if not isinstance(b, dict):
@@ -406,6 +450,8 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
                         fp = str((id2input.get(tuid) or {}).get("file_path", "?"))
                         cur = s.reads.get(fp) or [0, 0]
                         s.reads[fp] = [cur[0] + 1, cur[1] + text_n + img_n]
+    if pending is not None:
+        _flush_usage(s, pending[1])
     return s
 
 
