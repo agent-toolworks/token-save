@@ -130,12 +130,50 @@ def p_rereads():
     return recs
 
 
+def p_subagents(out, name):
+    """A main session plus subagent transcripts NESTED below it.
+
+    This is the only fixture with a directory shape rather than just a content
+    shape, and it exists because a one-level glob silently skipped every
+    subagent transcript on a real machine -- 21.9% of that machine's billed
+    spend. Every other fixture is written flat, so the discovery bug could not
+    have been caught by any of them however many were added.
+
+    Two layouts are seen in the wild and both appear here:
+        <project>/<session>/subagents/<agent>.jsonl
+        <project>/<session>/<agent>.jsonl
+    """
+    root = os.path.join(out, name, "proj")
+    os.makedirs(root, exist_ok=True)
+
+    # Main thread: cheap, so the subagents dominate cost.
+    main, ctx = [], 10000
+    for _ in range(8):
+        main.append(asst(usage(ctx, 200), [{"type": "text", "text": text_of(20)}]))
+        ctx += 200
+    with open(os.path.join(root, "main.jsonl"), "w") as fh:
+        for r in main:
+            fh.write(json.dumps(r) + "\n")
+
+    for i, sub in enumerate(("main/subagents", "main")):
+        d = os.path.join(root, sub) if sub != "main" else os.path.join(root, "main")
+        os.makedirs(d, exist_ok=True)
+        recs, c = [], 20000
+        for _ in range(25):
+            recs.append(asst(usage(c, 3000), [{"type": "text", "text": text_of(30)}]))
+            c += 3000
+        with open(os.path.join(d, "agent-%d.jsonl" % i), "w") as fh:
+            for r in recs:
+                fh.write(json.dumps(r) + "\n")
+
+
 PROFILES = {
     "verbose": (p_verbose, "output-verbosity"),
     "thinking": (p_thinking, "thinking"),
     "attachments": (p_attachments, "attachments"),
     "images": (p_images, "images"),
     "rereads": (p_rereads, "repeat-reads"),
+    "subagents": (None, "subagent-cost"),   # writes its own tree
 }
 
 
@@ -148,7 +186,10 @@ def main(argv=None) -> int:
         d = os.path.join(args.out, name)
         if os.path.isdir(d):
             shutil.rmtree(d)
-        write_fleet(args.out, name, fn())
+        if fn is None:
+            p_subagents(args.out, name)
+        else:
+            write_fleet(args.out, name, fn())
         print("  %-14s -> expects %s" % (name, detector))
     return 0
 

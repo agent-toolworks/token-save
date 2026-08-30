@@ -204,7 +204,9 @@ def d_session_length(fleet, mach):
             "Use `/compact` at natural boundaries rather than letting context "
             "run to the limit.",
             "Push exploratory reading into subagents — their transcript never "
-            "enters the main thread's permanent history.",
+            "enters the main thread's permanent history. Note this moves cost "
+            "rather than removing it: the subagent's own turns are billed, and "
+            "`subagent-cost` reports what they came to.",
         ])
 
 
@@ -332,7 +334,9 @@ def d_mcp_schema(fleet, mach):
         return None
     n_global = len(mcp["global"])
     n_proj = sum(len(v) for v in mcp["projects"].values())
-    total = n_global + n_proj
+    called = fleet.mcp_servers_called()
+    # Configured is a subset: plugin-provided servers never appear there.
+    total = max(n_global + n_proj, len(called))
     if total == 0:
         return None
     env = mach["env"]
@@ -343,8 +347,13 @@ def d_mcp_schema(fleet, mach):
     at_risk = bool(base_url) and tool_search in (None, "", "false", "0", "off")
     if not at_risk and total <= 3:
         return None
-    ev = ["{} MCP server(s) configured ({} global, {} project-scoped)".format(
-        total, n_global, n_proj)]
+    ev = ["{} MCP server(s) configured ({} global, {} project-scoped); "
+          "{} actually called".format(
+              n_global + n_proj, n_global, n_proj, len(called))]
+    if len(called) > n_global + n_proj:
+        ev.append("{} more were called than are configured — plugin-provided "
+                  "servers do not appear in the config".format(
+                      len(called) - (n_global + n_proj)))
     for proj, names in list(mcp["projects"].items())[:4]:
         ev.append("    {}: {}".format(
             os.path.basename(proj.rstrip("/")), ", ".join(names)))
@@ -474,9 +483,49 @@ def d_attachments(fleet, mach):
         ])
 
 
+def d_subagent_cost(fleet, mach):
+    """Subagent turns are billed like any other, and are easy to treat as free.
+
+    Delegation genuinely helps the MAIN thread: the subagent's transcript never
+    enters it, so it does not inflate the context every later turn re-reads.
+    But the subagent runs its own context with its own preamble, and that is
+    billed. Until the recursive-discovery fix this tool could not see any of
+    it, which meant `session-length` recommended delegating while being
+    structurally blind to what delegating cost.
+    """
+    subs = fleet.subagents()
+    if not subs:
+        return None
+    share = fleet.subagent_cost_share()
+    if share < 5:
+        return None
+    turns = sum(s.turns for s in subs)
+    floors = sorted(s.floor for s in subs if s.floor)
+    ev = ["{:,} subagent transcript(s), {:,} turns, {:.1f}% of cost-weighted "
+          "spend".format(len(subs), turns, share)]
+    if floors:
+        ev.append("each carries its own preamble; median {:,} tokens, paid "
+                  "again per subagent".format(quantile(floors, 0.5)))
+    ev.append("delegation keeps work out of the MAIN thread's history, which "
+              "is real — but the subagent's own turns are billed")
+    return Finding(
+        id="subagent-cost",
+        title="Subagent traffic is a large share of spend",
+        severity="medium", confidence="derived",
+        saving_pct=0.0,
+        evidence=ev,
+        actions=[
+            "Delegate for context hygiene, not as a saving — measure both "
+            "sides before assuming a subagent is cheaper than doing it inline.",
+            "A subagent spawned for a two-line answer pays a full preamble to "
+            "get it. Batch small questions into one agent, or ask inline.",
+        ])
+
+
 DETECTORS = [
     d_preamble,
     d_session_length,
+    d_subagent_cost,
     d_bash_chatter,
     d_bash_bulk,
     d_output_verbosity,
@@ -490,6 +539,7 @@ DETECTORS = [
 CATALOGUE = {
     "preamble": "Fixed preamble re-read every turn",
     "session-length": "Long sessions dominate spend",
+    "subagent-cost": "Subagent traffic is a large share of spend",
     "bash-chatter": "Bash cost is call volume, not output size",
     "bash-bulk": "Fat Bash output — a compressor would pay",
     "output-verbosity": "Output tokens are a large share of spend",

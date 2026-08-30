@@ -112,6 +112,16 @@ def _shape_block(fleet: Fleet) -> str:
          "{:,}".format(quantile(floors, 0.9)) if floors else "-",
          "{:,}".format(floors[-1]) if floors else "-"],
     ], ["", "median", "p90", "max"], "lrrr"))
+    subs = fleet.subagents()
+    if subs:
+        out.append("")
+        out.append(R.kv("subagent transcripts", "{:,}".format(len(subs)),
+                        "%.1f%% of spend, %s turns"
+                        % (fleet.subagent_cost_share(),
+                           "{:,}".format(sum(x.turns for x in subs)))))
+        out.append("  " + R.dim("counted in every total above; excluded from "
+                                "the session-shape rows, which are about the "
+                                "main thread"))
     if floors:
         med_floor = quantile(floors, 0.5)
         total_reads = fleet.billed()["cache_read"]

@@ -175,6 +175,7 @@ class Session:
     reads: dict = field(default_factory=dict)       # file path -> [count, tokens]
     images: int = 0
     mtime: float = 0.0
+    is_subagent: bool = False
 
     @property
     def content_total(self) -> int:
@@ -221,12 +222,54 @@ def transcript_dir() -> str:
 
 
 def find_transcripts(root: str = None, project: str = None) -> list:
+    """Every transcript under ``root``, at any depth.
+
+    Subagent transcripts are written BELOW the session directory --
+    ``<project>/<session-id>/subagents/<agent-id>.jsonl`` in one layout,
+    ``<project>/<session-id>/<agent-id>.jsonl`` in another -- and they carry
+    ordinary ``usage`` records, so they are billed exactly like main-thread
+    turns. A one-level glob never opened them: on the machine that reported
+    this, 21.9% of billed spend and 34% of turns were invisible.
+
+    That omission was self-serving in a way worth naming: ``session-length``
+    recommends pushing exploratory work into subagents, and the tool could not
+    see the cost of taking its own advice.
+
+    Recursive, then deduplicated against the flat glob, so a flat layout
+    behaves exactly as before.
+    """
     root = root or transcript_dir()
-    pat = os.path.join(root, project or "*", "*.jsonl")
-    return sorted(glob.glob(pat))
+    scope = project or "*"
+    flat = glob.glob(os.path.join(root, scope, "*.jsonl"))
+    deep = glob.glob(os.path.join(root, scope, "**", "*.jsonl"), recursive=True)
+    return sorted(set(flat) | set(deep))
 
 
-def parse(path: str, usage_only: bool = False) -> Session:
+def _project_of(path: str, root: str) -> str:
+    """The project directory a transcript belongs to, however deep it sits."""
+    try:
+        rel = os.path.relpath(path, root)
+    except ValueError:
+        return os.path.basename(os.path.dirname(path))
+    parts = rel.split(os.sep)
+    return parts[0] if len(parts) > 1 else os.path.basename(os.path.dirname(path))
+
+
+def is_subagent_path(path: str, root: str) -> bool:
+    """True when a transcript is a subagent's rather than a main thread's.
+
+    Depth is the signal, not the directory name: the two layouts seen in the
+    wild differ by one level and only one of them uses a ``subagents/``
+    directory, but both put the agent deeper than ``<project>/<file>``.
+    """
+    try:
+        rel = os.path.relpath(path, root)
+    except ValueError:
+        return False
+    return len(rel.split(os.sep)) > 2
+
+
+def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
     """Account for one transcript. Never raises on a malformed line.
 
     ``usage_only`` skips all content accounting and keeps only the billed
@@ -235,9 +278,11 @@ def parse(path: str, usage_only: bool = False) -> Session:
     render would be felt. With tiktoken installed the difference is roughly
     two orders of magnitude; with the estimator it is still worth having.
     """
+    root = root or transcript_dir()
     s = Session(path=path,
-                project=os.path.basename(os.path.dirname(path)),
-                session_id=os.path.basename(path)[:-6])
+                project=_project_of(path, root),
+                session_id=os.path.basename(path)[:-6],
+                is_subagent=is_subagent_path(path, root))
     try:
         s.mtime = os.path.getmtime(path)
     except OSError:
@@ -371,10 +416,11 @@ class Fleet:
 
     @classmethod
     def load(cls, root: str = None, project: str = None, limit: int = None) -> "Fleet":
+        root = root or transcript_dir()
         paths = find_transcripts(root, project)
         if limit:
             paths = sorted(paths, key=lambda p: -os.path.getmtime(p))[:limit]
-        return cls(sessions=[parse(p) for p in paths])
+        return cls(sessions=[parse(p, root=root) for p in paths])
 
     # -- aggregates ---------------------------------------------------------
     def billed(self) -> dict:
@@ -406,8 +452,46 @@ class Fleet:
         return sum(s.turns for s in self.sessions)
 
     def substantive(self, min_turns: int = 5) -> list:
-        """Sessions long enough for turn-shape statistics to mean anything."""
-        return [s for s in self.sessions if s.turns >= min_turns]
+        """Main-thread sessions long enough for turn-shape stats to mean
+        anything. Subagents are excluded deliberately: their length is not a
+        habit anyone can change by clearing, and folding them in halves the
+        median turn count while telling you nothing actionable. Cost
+        aggregates below count them like any other traffic."""
+        return [s for s in self.sessions
+                if s.turns >= min_turns and not s.is_subagent]
+
+    def mcp_servers_called(self) -> set:
+        """Distinct MCP servers actually invoked, from the tool names on the
+        wire (``mcp__<server>__<tool>``).
+
+        The configured count misses plugin-provided servers entirely -- on the
+        machine that reported this, 3 were configured and 10 were called, six
+        of them arriving via plugins. What was called is ground truth; what is
+        configured is a subset of it.
+        """
+        out = set()
+        for sess in self.sessions:
+            for name in sess.tool_calls:
+                if not isinstance(name, str):
+                    continue
+                if name.startswith("mcp__"):
+                    parts = name.split("__", 2)
+                    if len(parts) == 3 and parts[1]:
+                        out.add(parts[1])
+                elif name.startswith("mcp_"):
+                    parts = name.split("_", 2)
+                    if len(parts) == 3 and parts[1]:
+                        out.add(parts[1])
+        return out
+
+    def subagents(self) -> list:
+        return [s for s in self.sessions if s.is_subagent]
+
+    def subagent_cost_share(self) -> float:
+        total = self.cost_units()
+        if not total:
+            return 0.0
+        return 100.0 * sum(s.cost_units for s in self.subagents()) / total
 
     def merged(self, attr: str) -> dict:
         out = {}
@@ -456,10 +540,82 @@ def human(n) -> str:
     return "%d" % n
 
 
-_PROG = re.compile(r"^(?:cd\s+\S+\s*(?:&&|;)\s*)*([\w.\-/]+)")
+# Words that precede the real program without being it.
+_WRAPPERS = frozenset({"env", "command", "exec", "nohup", "time", "sudo",
+                       "builtin", "then", "do", "!"})
+# Shell constructs that ARE the thing being run; reporting them is correct.
+_KEYWORDS = frozenset({"for", "while", "until", "if", "case", "select",
+                       "function"})
+_CONNECTORS = frozenset({"&&", "||", ";", "|", "(", ")", "{", "}"})
+# Commands that only prepare the environment. A line consisting solely of one
+# of these is scenery: the program a multi-line script "runs" is the first line
+# that actually does something.
+_PREFIX_CMDS = frozenset({"cd", "export", "set", "unset", "source", ".",
+                          "shopt", "umask"})
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Non-greedy up to the first separator, so a quoted path with spaces is
+# consumed without this pattern carrying quote literals of its own.
+_CD = re.compile(r"^cd\s+.*?(?:&&|\|\||;|\n)\s*", re.S)
+_WORD = re.compile(r"^(\S+)\s*")
 
 
-def command_program(cmd: str) -> str:
-    """The program a shell command actually runs, past any cd prefixes."""
-    m = _PROG.match((cmd or "").strip())
-    return m.group(1).rsplit("/", 1)[-1] if m else "?"
+def _program_of_segment(rest):
+    """Classify one command segment, consuming prefixes in a loop.
+
+    A loop rather than a wider regex, because the obvious widening leaks the
+    other way: a bare redirect digit or a ``for`` keyword becomes the
+    "program". Keywords are returned deliberately -- a command that really is a
+    ``for`` loop is honestly reported as one.
+    """
+    for _ in range(24):          # bounded: no pathological input can spin here
+        if not rest:
+            return "?"
+        m = _CD.match(rest)
+        if m:
+            rest = rest[m.end():]
+            continue
+        m = _WORD.match(rest)
+        if not m:
+            return "?"
+        word = m.group(1)
+        if word in _CONNECTORS or _ASSIGN.match(word) or word in _WRAPPERS:
+            rest = rest[m.end():]
+            continue
+        if word in _KEYWORDS:
+            return word
+        prog = word.rsplit("/", 1)[-1].strip("\"'`;|&(){}")
+        return prog or "?"
+    return "?"
+
+
+def command_program(cmd):
+    """The program a shell command actually runs.
+
+    A single leading-token regex used to be enough until it wasn't: it took the
+    first word-ish run of characters, so ``SP=/some/path cmd`` reported ``SP``.
+    On the machine that reported this, 42.4% of Bash calls were attributed to a
+    variable that does not exist, pushing the real leaders off the table.
+
+    Newlines separate commands as surely as ``&&`` does. A call that opens with
+    a ``cd`` line and continues on the next is extremely common, and treating
+    only ``&&``/``;`` as separators left ``cd`` and ``export`` at the top of
+    the leaderboard describing nothing.
+    """
+    text = (cmd or "").strip()
+    if not text:
+        return "?"
+    fallback = None
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        prog = _program_of_segment(line)
+        if prog == "?":
+            continue
+        if prog in _PREFIX_CMDS:
+            # Scenery. Remember it in case the whole call is scenery, but keep
+            # looking for something that does work.
+            fallback = fallback or prog
+            continue
+        return prog
+    return fallback or "?"

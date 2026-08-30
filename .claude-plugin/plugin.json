@@ -1,7 +1,7 @@
 {
   "name": "token-save",
   "description": "Measure what an AI coding session actually costs and get advice derived from your own transcripts — where the tokens went, which were re-read on every turn, and which fixes are worth making on this machine. Tells one person to install a compressor and the next that a compressor would be worthless, because it reads their numbers first.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "author": {
     "name": "Zvi Rahamim"
   },

@@ -114,8 +114,11 @@ def build(fleet: Fleet, mach: dict) -> dict:
         },
         "setup": {
             # Counts and booleans only. Never the server names, never the paths.
-            "mcp_servers": (len(mach["mcp"]["global"])
-                            + sum(len(v) for v in mach["mcp"]["projects"].values())),
+            "mcp_servers_configured": (len(mach["mcp"]["global"])
+                                       + sum(len(v) for v in mach["mcp"]["projects"].values())),
+            # Counts only. Server NAMES stay out: they can identify an employer
+            # or an internal service.
+            "mcp_servers_called": len(fleet.mcp_servers_called()),
             "skills_installed": mach["skills"]["count"],
             "skills_tokens_on_disk": mach["skills"]["total"],
             "memory_tokens": mach["memory"]["total"],
