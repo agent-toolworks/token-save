@@ -81,10 +81,14 @@ decision with the user rather than telling them to clear.
 3. **Quote the evidence lines.** Each finding carries the measurements that
    made it fire. A user is far more likely to act on "your median session is
    260 turns and peaks at 254K" than on "consider clearing more often".
-4. **Respect the confidence labels.** `measured` is arithmetic on exact billed
-   numbers from the provider. `estimated` involves a token estimate.
-   `heuristic` means the direction is right and the magnitude is not. Do not
-   present a heuristic as a measurement.
+4. **Respect the confidence labels, and repeat the assumption.** The label
+   qualifies the *saving*, not the evidence. `derived` means the projection
+   follows from the machine's own measured shape; `estimated` means measured
+   inputs plus a stated assumption; `heuristic` means the direction is right
+   and the magnitude is not. Every non-derived finding prints an `assuming:`
+   line — quote it. A projection repeated without its assumption becomes a
+   measurement in the reader's head, which is the failure this tool exists to
+   catch.
 5. **Offer `ts fixes` only where a finding names one.** Everything else is
    behavioural on purpose — no script can shorten someone's sessions.
 

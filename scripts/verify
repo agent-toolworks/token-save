@@ -147,6 +147,27 @@ PY
 [[ -z $both ]] && ok "bash-chatter and bash-bulk are mutually exclusive" \
                 || bad "the two Bash detectors overlap" "$both"
 
+# A projection with an unstated assumption is the exact failure this tool was
+# built to catch someone else committing, so it may not exist in this tool.
+asm=$(python3 - "$TMP/chatter.advise.json" "$TMP/bulk.advise.json" <<'ASM'
+import json, sys
+bad = []
+for path in sys.argv[1:]:
+    for f in json.load(open(path))["findings"]:
+        c = f.get("confidence")
+        if c == "measured":
+            bad.append("%s: a saving may not be labelled 'measured'" % f["id"])
+        if c != "derived" and not f.get("assumption"):
+            bad.append("%s: %s saving with no stated assumption" % (f["id"], c))
+print("|".join(sorted(set(bad))))
+ASM
+)
+if [[ -z $asm ]]; then
+  ok "every non-derived saving states what it assumed"
+else
+  bad "unstated assumptions" "${asm//|/$'\n        '}"
+fi
+
 # Severity must agree with the number it is derived from.
 sev=$(python3 - "$TMP/chatter.advise.json" <<'PY'
 import json, sys

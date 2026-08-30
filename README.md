@@ -165,9 +165,22 @@ and the estimated side is labelled. Every finding also carries a confidence:
 
 | label | meaning |
 |---|---|
-| `measured` | arithmetic on exact billed numbers |
-| `estimated` | arithmetic on estimated content sizes |
+| `derived` | the projection follows from this machine's own measured shape |
+| `estimated` | measured inputs, plus a stated assumption about what you change |
 | `heuristic` | the direction is right, the magnitude is not |
+
+The label qualifies the **saving**, not the evidence — evidence is measured or
+it is not reported. No saving is ever labelled `measured`: a saving is always a
+projection. An earlier version did label three of them that way, while
+multiplying exact billed figures by an invented constant. That is the failure
+this tool exists to catch, so `verify` now rejects it, and every non-derived
+finding must print the assumption behind its number:
+
+```
+  HIGH  Long sessions dominate spend  [session-length]
+        derived     worth ~30.6% of spend
+        assuming: each heavy session split once at its midpoint
+```
 
 Severity is **derived from** estimated impact rather than declared separately,
 so the ranking can never disagree with its own numbers.

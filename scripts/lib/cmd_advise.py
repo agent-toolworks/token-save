@@ -39,6 +39,8 @@ def _render(findings, fleet, show_all: bool) -> None:
         meta = "        %s   worth ~%.1f%% of spend" % (
             R.confidence(f.confidence), f.saving_pct)
         print(meta)
+        if f.assumption:
+            print("        " + R.dim("assuming: " + f.assumption))
         print()
         for line in f.evidence:
             print("    " + R.dim("·") + " " + line)
@@ -103,6 +105,7 @@ def main(argv=None) -> int:
                 "id": f.id, "title": f.title, "severity": f.severity,
                 "confidence": f.confidence,
                 "saving_pct": round(f.saving_pct, 2),
+             "assumption": f.assumption,
                 "evidence": f.evidence, "actions": f.actions, "fix": f.fix,
             } for f in findings],
             "silent": [k for k in advise.CATALOGUE

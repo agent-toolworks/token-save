@@ -12,9 +12,17 @@ token) and as a share of measured spend, so a fix that removes a few tokens
 from every one of a thousand turns ranks above one that removes many tokens
 once. Each carries a confidence label:
 
-    measured   — arithmetic on exact billed numbers
-    estimated  — arithmetic on estimated content sizes
-    heuristic  — a rule of thumb; the direction is right, the magnitude is not
+The label qualifies the SAVING, not the evidence. Evidence is measured or it
+is not reported; a saving is always a projection, so no saving is ever labelled
+"measured" — an earlier cut did exactly that for three detectors whose numbers
+multiplied exact billed figures by an invented constant, which is the failure
+this tool was built to catch someone else committing.
+
+    derived    — the projection follows from this machine's own measured shape
+    estimated  — measured inputs, but a stated assumption about what you change
+    heuristic  — the direction is right, the magnitude is not
+
+Every non-derived Finding must carry an `assumption` naming what was assumed.
 
 Adding a detector: write a function taking (fleet, mach) and returning a
 Finding or None, then list it in DETECTORS. Keep the thresholds visible in the
@@ -58,6 +66,10 @@ class Finding:
     evidence: list = field(default_factory=list)
     actions: list = field(default_factory=list)
     fix: str = None          # id understood by fixes.py, when auto-appliable
+    # What had to be assumed to turn measured facts into a saving. Printed
+    # next to the number. A projection with an unstated assumption is the
+    # thing this tool exists to complain about, so it may not be omitted.
+    assumption: str = ""
 
     @property
     def rank(self) -> tuple:
@@ -118,8 +130,9 @@ def d_preamble(fleet, mach):
     return Finding(
         id="preamble",
         title="Fixed preamble is re-read every turn",
-        severity=sev, confidence="measured",
-        saving_pct=to_spend(fleet, share) * 0.33,   # a third trimmed is aggressive but reachable
+        severity=sev, confidence="estimated",
+        assumption="a third of the preamble is removable",
+        saving_pct=to_spend(fleet, share) * 0.33,
         evidence=ev,
         actions=[
             "Audit the files above: `ts doctor --memory` lists them by size.",
@@ -156,15 +169,34 @@ def d_session_length(fleet, mach):
     ev.append("cost of a session grows ~quadratically in its turn count, "
               "because every turn re-reads all prior turns")
 
-    # Halving the length of the longest sessions removes roughly three quarters
-    # of their cost. Bounded by the share those sessions represent.
+    # Derive the saving from each heavy session's OWN shape rather than a flat
+    # multiplier. A session of N turns whose context runs from F to P costs
+    # about N*(F+P)/2 in reads. Split it in two at the midpoint and each half
+    # restarts at F and ends at M = (F+P)/2, for a total of N*(F+M)/2. So
+    #
+    #     saving fraction = (P - M) / (F + P) = (P - F) / (2 * (F + P))
+    #
+    # which is measured per session, not guessed. A comment here previously
+    # claimed "roughly three quarters" while the code applied 0.35; neither
+    # was derived from anything.
     heavy = sorted(subs, key=lambda s: -s.cost_units)[:max(1, len(subs) // 4)]
-    heavy_share = pct(sum(s.cost_units for s in heavy), fleet.cost_units())
+    heavy_cost = sum(s.cost_units for s in heavy)
+    heavy_share = pct(heavy_cost, fleet.cost_units())
+    saved = 0.0
+    for h in heavy:
+        F, P = float(h.floor or 0), float(h.peak or 0)
+        if F > 0 and P > F:
+            saved += h.cost_units * ((P - F) / (2.0 * (F + P)))
+    derived_pct = pct(saved, fleet.cost_units())
+    ev.append("splitting the heaviest %d session(s) in half would save about "
+              "%.0f%% of total spend, from their own measured shape"
+              % (len(heavy), derived_pct))
     return Finding(
         id="session-length",
         title="Long sessions dominate spend",
-        severity=sev, confidence="measured",
-        saving_pct=heavy_share * 0.35,
+        severity=sev, confidence="derived",
+        assumption="each heavy session split once at its midpoint",
+        saving_pct=derived_pct,
         evidence=ev,
         actions=[
             "Clear between unrelated tasks. A fresh session restarts at the "
@@ -208,6 +240,7 @@ def d_bash_chatter(fleet, mach):
         title="Bash cost is call volume, not output size",
         severity="high" if share >= 35 else "medium",
         confidence="estimated",
+        assumption="a quarter of Bash calls batchable, 30% off those",
         saving_pct=to_spend(fleet, share) * 0.25 * 0.30,
         evidence=ev,
         actions=[
@@ -246,6 +279,7 @@ def d_bash_bulk(fleet, mach):
         title="Fat Bash output — a compressor would pay here",
         severity="high" if share >= 30 else "medium",
         confidence="estimated",
+        assumption="half the output compressible, 30% off it",
         saving_pct=to_spend(fleet, share) * 0.5 * 0.30,
         evidence=ev,
         actions=[
@@ -275,7 +309,8 @@ def d_output_verbosity(fleet, mach):
         id="output-verbosity",
         title="Output tokens are a large share of spend",
         severity="high" if out_share >= 20 else "medium",
-        confidence="measured",
+        confidence="estimated",
+        assumption="a fifth off output length",
         saving_pct=out_share * 0.20,
         evidence=[
             "{:,} output tokens = {:.1f}% of cost-weighted spend "

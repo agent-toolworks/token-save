@@ -89,10 +89,15 @@ def severity(level: str) -> str:
 
 
 def confidence(label: str) -> str:
-    """How much to trust a number. Mirrors `cs`'s evidence labelling: a reader
-    should never have to guess whether a figure was measured or inferred."""
+    """How much to trust a SAVING. Mirrors `cs`'s evidence labelling: a reader
+    should never have to guess whether a figure was derived or assumed. Note
+    this qualifies the projection, not the evidence beneath it -- evidence is
+    measured or it is not printed."""
     return {
-        "measured": green("measured"),
+        "derived": green("derived  "),
         "estimated": yellow("estimated"),
         "heuristic": dim("heuristic"),
+        # Retained so an out-of-tree detector using the old vocabulary still
+        # renders; nothing in this repo emits it any more.
+        "measured": green("measured "),
     }.get(label, dim(label))
