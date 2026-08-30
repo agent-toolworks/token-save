@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# Only the newest commit on a ref is worth testing. Without this, a run of
+# quick successive pushes queues a full four-way matrix each, and the macOS
+# runners serialise into a backlog where the answer you want arrives last.
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     strategy:
