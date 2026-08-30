@@ -249,6 +249,59 @@ for fid in terse-output tool-search; do
   fi
 done
 
+# A one-key change must produce a one-key diff. The writer used to round-trip
+# settings.json through json.dump(), whose ensure_ascii escaped every em-dash
+# and whose indent= re-indented every line, so adding one key rewrote lines
+# nobody had touched. Both halves are pinned: unrelated prose, and the file's
+# own indent width.
+FCFG="$TMP/fmt"; mkdir -p "$FCFG"
+cat > "$FCFG/settings.json" <<'JSON'
+{
+    "permissions": {
+        "allow": ["Bash(ls:*)"]
+    },
+    "note": "policy — written in sentences — with typographic punctuation"
+}
+JSON
+cp "$FCFG/settings.json" "$FCFG/orig"
+CLAUDE_CONFIG_DIR="$FCFG" "$TS" fixes apply tool-search --yes >/dev/null 2>&1
+churn=$(diff "$FCFG/orig" "$FCFG/settings.json" | grep -c '^[<>]' || true)
+if grep -q '—' "$FCFG/settings.json" \
+   && grep -q '^        "allow"' "$FCFG/settings.json" \
+   && [[ $churn -le 5 ]]; then
+  ok "tool-search edits in place: em-dashes and indent width survive"
+else
+  bad "tool-search rewrote unrelated lines ($churn lines changed)" \
+      "$(diff "$FCFG/orig" "$FCFG/settings.json" | head -8)"
+fi
+
+# apply then revert must be a no-op on the bytes. The trailing newline is the
+# classic casualty -- revert used to rstrip() the file and re-add one, so a
+# file that never ended in a newline came back with one.
+for variant in trailing no-trailing; do
+  RCFG="$TMP/rt-$variant"; mkdir -p "$RCFG"
+  if [[ $variant == trailing ]]; then
+    printf '# Notes\n\n\ntext\n' > "$RCFG/CLAUDE.md"
+  else
+    printf '# Notes\n\n\ntext' > "$RCFG/CLAUDE.md"
+  fi
+  printf '{\n  "model": "opus"\n}\n' > "$RCFG/settings.json"
+  cp "$RCFG/CLAUDE.md" "$RCFG/md.orig"
+  cp "$RCFG/settings.json" "$RCFG/js.orig"
+  for fid in terse-output tool-search; do
+    CLAUDE_CONFIG_DIR="$RCFG" "$TS" fixes apply "$fid" --yes >/dev/null 2>&1
+    CLAUDE_CONFIG_DIR="$RCFG" "$TS" fixes revert "$fid" >/dev/null 2>&1
+  done
+  if cmp -s "$RCFG/md.orig" "$RCFG/CLAUDE.md" \
+     && cmp -s "$RCFG/js.orig" "$RCFG/settings.json"; then
+    ok "apply+revert is byte-identical ($variant newline)"
+  else
+    bad "apply+revert altered the file ($variant newline)" \
+        "$(diff "$RCFG/md.orig" "$RCFG/CLAUDE.md"; \
+           diff "$RCFG/js.orig" "$RCFG/settings.json")"
+  fi
+done
+
 # A corrupt settings.json must be refused, not overwritten. This is the one
 # failure mode that would destroy user configuration.
 printf '{ this is not json' > "$CLAUDE_CONFIG_DIR/settings.json"

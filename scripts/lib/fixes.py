@@ -103,9 +103,14 @@ def terse_apply():
     backup = _backup(path) if os.path.isfile(path) else None
     block = "\n%sterse-output -->\n%s%sterse-output -->\n" % (
         MARKER_BEGIN, TERSE_BLOCK, MARKER_END)
+    # A file with no trailing newline must not acquire one, or apply+revert is
+    # not a no-op and shows up as a diff. Terminate its last line (otherwise
+    # the marker lands mid-sentence) but leave the block itself unterminated,
+    # so the file's trailing-newline state still mirrors the original and
+    # revert can put it back exactly.
+    if cur and not cur.endswith("\n"):
+        block = "\n" + block[:-1]
     with open(path, "a") as fh:
-        if cur and not cur.endswith("\n"):
-            fh.write("\n")
         fh.write(block)
     return True, "appended to %s%s" % (
         path, " (backup: %s)" % backup if backup else "")
@@ -118,18 +123,135 @@ def terse_revert():
     end = MARKER_END + "terse-output -->"
     if begin not in cur:
         return False, "not applied"
+    trailing = cur.endswith("\n")
     i = cur.index(begin)
     j = cur.index(end) + len(end)
-    new = (cur[:i] + cur[j:]).rstrip() + "\n"
+    # Take back exactly what apply() wrote: the block's own terminator and the
+    # blank-line separator in front of it. Anything else in the file -- runs of
+    # blank lines the author put there -- is not ours to normalise.
+    if j < len(cur) and cur[j] == "\n":
+        j += 1
+    if i and cur[i - 1] == "\n":
+        i -= 1
+    new = cur[:i] + cur[j:]
+    if not trailing and not cur[j:]:
+        new = new.rstrip("\n")     # apply() also had to terminate the last line
     _backup(path)
     with open(path, "w") as fh:
         fh.write(new)
     return True, "removed the block from %s" % path
 
-
 # ---------------------------------------------------------------------------
 # tool-search: keep MCP tool deferral on behind a custom base URL
 # ---------------------------------------------------------------------------
+
+# settings.json is the user's own file: hand-written, often version-controlled,
+# and frequently full of prose -- `permissions` rules and policy blocks get
+# written in sentences, with typographic punctuation. Round-tripping it through
+# json.dump() rewrites all of that: ensure_ascii escapes every em-dash and
+# indent= re-indents every line, so a one-key change lands as a diff of lines
+# nobody touched. That is worse than cosmetic. `ts fixes` is offered as the
+# reviewable option -- backup, diff, revert -- and a large unexplained diff
+# from an automated editor of your config teaches you to stop reading them.
+#
+# So the key is spliced in as text. json still does the parsing, both to
+# validate the file and to locate the edit; bytes outside the edit are never
+# re-serialised.
+
+_DECODER = json.JSONDecoder()
+
+
+def _skip_ws(s: str, i: int) -> int:
+    while i < len(s) and s[i] in " \t\r\n":
+        i += 1
+    return i
+
+
+def _members(s: str, start: int):
+    """Walk the object at s[start], yielding (key, key_start, val_start, val_end).
+
+    Offsets into s, so a caller can rewrite one member and leave every other
+    byte of the file alone.
+    """
+    i = _skip_ws(s, start)
+    if i >= len(s) or s[i] != "{":
+        return
+    i += 1
+    while True:
+        i = _skip_ws(s, i)
+        if i >= len(s) or s[i] != '"':
+            return
+        key_start = i
+        key, i = json.decoder.scanstring(s, i + 1)
+        i = _skip_ws(s, _skip_ws(s, i) + 1)      # past the colon
+        val_start = i
+        _v, i = _DECODER.raw_decode(s, i)
+        yield key, key_start, val_start, i
+        i = _skip_ws(s, i)
+        if i < len(s) and s[i] == ",":
+            i += 1
+
+
+def _find(s: str, start: int, key: str):
+    for rec in _members(s, start):
+        if rec[0] == key:
+            return rec
+    return None
+
+
+def _line_indent(s: str, idx: int):
+    """The whitespace before idx on its line, or None if idx is not the first
+    thing on it -- i.e. the object is written inline and should stay inline."""
+    bol = s.rfind("\n", 0, idx) + 1
+    prefix = s[bol:idx]
+    return prefix if prefix.strip() == "" else None
+
+
+def _member_indent(s: str, obj_start: int):
+    members = list(_members(s, obj_start))
+    return _line_indent(s, members[0][1]) if members else None
+
+
+def _indent_unit(s: str) -> str:
+    """The file's own indent step, taken from its first indented line."""
+    for line in s.splitlines():
+        stripped = line.lstrip(" \t")
+        if stripped and stripped != line:
+            return line[:len(line) - len(stripped)]
+    return "  "
+
+
+def _insert_member(s: str, obj_start: int, key: str, value_src: str) -> str:
+    """Splice `"key": value_src` in as the last member of an object."""
+    obj_start = _skip_ws(s, obj_start)
+    _obj, obj_end = _DECODER.raw_decode(s, obj_start)
+    close = s.rindex("}", obj_start, obj_end)
+    members = list(_members(s, obj_start))
+    entry = "%s: %s" % (json.dumps(key, ensure_ascii=False), value_src)
+    if not members:
+        return s[:obj_start + 1] + entry + s[close:]
+    indent = _line_indent(s, members[0][1])
+    end = members[-1][3]
+    sep = ", " if indent is None else ",\n" + indent
+    return s[:end] + sep + entry + s[end:]
+
+
+def _remove_member(s: str, obj_start: int, key: str) -> str:
+    """Cut one member out of an object, taking exactly one comma with it."""
+    members = list(_members(s, obj_start))
+    idx = next((n for n, m in enumerate(members) if m[0] == key), None)
+    if idx is None:
+        return s
+    _k, key_start, _vs, val_end = members[idx]
+    if len(members) == 1:
+        obj_start = _skip_ws(s, obj_start)
+        _obj, obj_end = _DECODER.raw_decode(s, obj_start)
+        close = s.rindex("}", obj_start, obj_end)
+        return s[:obj_start + 1] + s[close:]                 # -> {}
+    if idx + 1 < len(members):
+        return s[:key_start] + s[members[idx + 1][1]:]       # up to the next key
+    return s[:members[idx - 1][3]] + s[val_end:]             # last: eat the comma before
+
 
 def _settings_path() -> str:
     return os.path.join(CLAUDE_HOME, "settings.json")
@@ -171,39 +293,65 @@ def toolsearch_show():
 
 def toolsearch_apply():
     path = _settings_path()
+    raw = _read(path) if os.path.isfile(path) else ""
     data, ok = _load_settings(path)
     if not ok:
         return False, "settings.json does not parse — refusing to overwrite it"
-    env = data.setdefault("env", {})
-    if str(env.get("ENABLE_TOOL_SEARCH")).lower() in ("true", "1", "on"):
+    env = data.get("env")
+    if env is not None and not isinstance(env, dict):
+        return False, '"env" is not an object — refusing to touch it'
+    if str((env or {}).get("ENABLE_TOOL_SEARCH")).lower() in ("true", "1", "on"):
         return False, "already applied"
+
     backup = _backup(path) if os.path.isfile(path) else None
-    env["ENABLE_TOOL_SEARCH"] = "true"
+    unit = _indent_unit(raw) if raw.strip() else "  "
+
+    if not raw.strip():
+        new = '{\n%s"env": {\n%s%s"ENABLE_TOOL_SEARCH": "true"\n%s}\n}\n' % (
+            unit, unit, unit, unit)
+    else:
+        top = _skip_ws(raw, 0)
+        rec = _find(raw, top, "env")
+        if rec is None:
+            indent = _member_indent(raw, top)
+            if indent is None:
+                value_src = '{"ENABLE_TOOL_SEARCH": "true"}'
+            else:
+                value_src = '{\n%s%s"ENABLE_TOOL_SEARCH": "true"\n%s}' % (
+                    indent, unit, indent)
+            new = _insert_member(raw, top, "env", value_src)
+        else:
+            inner = _find(raw, rec[2], "ENABLE_TOOL_SEARCH")
+            if inner is None:
+                new = _insert_member(raw, rec[2], "ENABLE_TOOL_SEARCH", '"true"')
+            else:
+                new = raw[:inner[2]] + '"true"' + raw[inner[3]:]
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as fh:
-        json.dump(data, fh, indent=2)
-        fh.write("\n")
+        fh.write(new)
     return True, "set env.ENABLE_TOOL_SEARCH=true in %s%s" % (
         path, " (backup: %s)" % backup if backup else "")
 
 
 def toolsearch_revert():
     path = _settings_path()
+    raw = _read(path) if os.path.isfile(path) else ""
     data, ok = _load_settings(path)
     if not ok:
         return False, "settings.json does not parse"
-    env = data.get("env") or {}
-    if "ENABLE_TOOL_SEARCH" not in env:
+    env = data.get("env")
+    if not isinstance(env, dict) or "ENABLE_TOOL_SEARCH" not in env:
         return False, "not applied"
+    top = _skip_ws(raw, 0)
+    if len(env) == 1:
+        new = _remove_member(raw, top, "env")   # the key was all env held
+    else:
+        new = _remove_member(raw, _find(raw, top, "env")[2], "ENABLE_TOOL_SEARCH")
     _backup(path)
-    del env["ENABLE_TOOL_SEARCH"]
-    if not env:
-        data.pop("env", None)
     with open(path, "w") as fh:
-        json.dump(data, fh, indent=2)
-        fh.write("\n")
+        fh.write(new)
     return True, "removed env.ENABLE_TOOL_SEARCH from %s" % path
-
 
 FIXES = {
     "terse-output": (terse_show, terse_apply, terse_revert),
