@@ -1,4 +1,6 @@
-# token-save-fleet
+# token-save
+
+[![verify](https://github.com/agent-toolworks/token-save/actions/workflows/verify.yml/badge.svg)](https://github.com/agent-toolworks/token-save/actions/workflows/verify.yml)
 
 Measure what your AI coding sessions actually cost, then get advice derived
 from *your* numbers instead of someone else's.
