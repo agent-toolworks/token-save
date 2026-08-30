@@ -132,7 +132,14 @@ belong there.
 ## Installing as a Claude Code plugin
 
 ```
-/plugin marketplace add <owner>/token-save-fleet
+/plugin marketplace add agent-toolworks/plugins   # every tool in the org
+/plugin install token-save
+```
+
+Or add this repository directly, if you only want this one:
+
+```
+/plugin marketplace add agent-toolworks/token-save
 /plugin install token-save
 ```
 
