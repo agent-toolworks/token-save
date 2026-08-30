@@ -619,3 +619,34 @@ def command_program(cmd):
             continue
         return prog
     return fallback or "?"
+
+_CD_CHAINED = re.compile(r"^cd\s+\S.*?(?:&&|\|\||;|\n)", re.S)
+_CD_STANDALONE = re.compile(r"^cd\s+\S+\s*$")
+
+
+def cd_shape(cmd):
+    """Classify how a command uses ``cd``: chained, standalone, or neither.
+
+    The two shapes are not interchangeable on every machine. ``cd X && cmd``
+    draws an approval prompt where a standalone ``cd`` followed by a scoped
+    command does not, and prefix-matched allowlists cover the second and not
+    the first. A machine carrying BOTH shapes in quantity is one actively
+    converting the first into the second -- a behavioural signal already
+    sitting in the transcripts, and the only discriminator proposed for this
+    that survived being measured. Revealed preference on compound commands
+    generally does not work: the reporting machine writes 37% compound calls
+    and still wants the cd advice suppressed.
+    """
+    text = (cmd or "").strip()
+    if not text:
+        return None
+    # Standalone means the WHOLE command is a cd -- not merely that it opens
+    # with one. Matching only the first line classified every multi-line script
+    # beginning with `cd` as standalone (622 of 622 on the first machine
+    # tested), which is the same newline blind spot as the original
+    # command_program bug, one level up.
+    if _CD_STANDALONE.match(text):
+        return "standalone"
+    if _CD_CHAINED.match(text):
+        return "chained"
+    return None

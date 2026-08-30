@@ -276,6 +276,35 @@ else
   bad "command_program misclassifies" "${prog//|/$'\n        '}"
 fi
 
+# The cd-shape discriminator decides whether bash-chatter tells you to batch
+# `cd` ceremony away or that doing so would be a bad trade. Both branches are
+# pinned, and so is the newline case that made every multi-line script look
+# standalone (622 of 622 on the first machine tested).
+cds=$(python3 - "$ROOT" <<'CDS'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "lib"))
+from transcripts import cd_shape
+cases = [
+    ("cd /x", "standalone"),
+    ("cd /x && npm run build", "chained"),
+    ("cd /x; ls", "chained"),
+    ("cd /x\necho hi\nrg foo", "chained"),    # multi-line is NOT standalone
+    ("cd /x\n", "standalone"),                # trailing newline only
+    ("git -C /x status", None),               # the scoped form uses no cd
+    ("echo hi", None),
+    ("", None),
+]
+bad = ["%s -> %s (want %s)" % (repr(c), cd_shape(c), w)
+       for c, w in cases if cd_shape(c) != w]
+print("|".join(bad))
+CDS
+)
+if [[ -z $cds ]]; then
+  ok "cd_shape distinguishes standalone from chained, multi-line included"
+else
+  bad "cd_shape misclassifies" "${cds//|/$'\n        '}"
+fi
+
 # ---------------------------------------------------------------------------
 head_ "5. DETECTOR COVERAGE  (every detector has something that fires it)"
 # ---------------------------------------------------------------------------

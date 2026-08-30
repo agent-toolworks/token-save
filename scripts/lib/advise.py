@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from transcripts import PRICE, pct, quantile  # noqa: E402
+from transcripts import PRICE, cd_shape, pct, quantile  # noqa: E402
 
 
 def to_spend(fleet, share_pct: float) -> float:
@@ -229,6 +229,14 @@ def d_bash_chatter(fleet, mach):
     # How much of the command text is pure ceremony: cd prefixes and absolute
     # path repetition. Measured, not assumed.
     cd_tok = sum(n for n, c in cmds if c.strip().startswith("cd "))
+    shapes = [cd_shape(c) for _n, c in cmds]
+    n_chained = shapes.count("chained")
+    n_standalone = shapes.count("standalone")
+    # Both shapes present in quantity = a machine mid-migration from the
+    # chained form to the standalone one, which is what a machine paying an
+    # approval prompt per chained call does. Recommending it batch them back
+    # is recommending the regression.
+    converting = n_chained >= 20 and n_standalone >= 0.2 * n_chained
     ev = ["{:,} Bash calls: {:,} tokens of command text + {:,} of output "
           "= {:.1f}% of all content".format(len(outs), cmd_tok, out_tok, share),
           "output size: median {:,}, p90 {:,}, max {:,}".format(
@@ -236,7 +244,9 @@ def d_bash_chatter(fleet, mach):
           "the commands cost {:.0f}% of what their output costs — "
           "no compressor touches that half".format(pct(cmd_tok, out_tok))]
     if cd_tok:
-        ev.append("{:,} tokens are in calls that begin with a `cd` prefix".format(cd_tok))
+        ev.append("{:,} tokens are in calls that begin with a `cd` prefix "
+                  "({:,} chained, {:,} standalone)".format(
+                      cd_tok, n_chained, n_standalone))
     return Finding(
         id="bash-chatter",
         title="Bash cost is call volume, not output size",
@@ -248,6 +258,16 @@ def d_bash_chatter(fleet, mach):
         actions=[
             "Batch related commands into one call (`a && b && c`) — it halves "
             "the turn count as well as the ceremony.",
+            # The measurement above stands either way; only the recommendation
+            # changes. Silence would throw away a true number the reader wants.
+            ("{:,} of those tokens are `cd` ceremony — but you already write "
+             "{:,} standalone `cd` calls against {:,} chained ones, so you are "
+             "converting that shape deliberately. On a machine that pays an "
+             "approval prompt per chained call, standalone is the cheaper "
+             "shape and batching it back would be a bad trade."
+             .format(cd_tok, n_standalone, n_chained)) if converting else
+            ("{:,} tokens are `cd` ceremony that a scoped flag (`git -C`, "
+             "`make -C`) removes without a second call.".format(cd_tok)),
             "Do NOT install an output compressor for this profile: at a median "
             "of {:,} tokens there is nothing in the output to compress.".format(med),
             "Prefer Read/Grep over `cat`/`sed -n` where you only need content: "
@@ -501,25 +521,55 @@ def d_subagent_cost(fleet, mach):
         return None
     turns = sum(s.turns for s in subs)
     floors = sorted(s.floor for s in subs if s.floor)
+    sub_turns = sorted(x.turns for x in subs)
     ev = ["{:,} subagent transcript(s), {:,} turns, {:.1f}% of cost-weighted "
           "spend".format(len(subs), turns, share)]
     if floors:
         ev.append("each carries its own preamble; median {:,} tokens, paid "
                   "again per subagent".format(quantile(floors, 0.5)))
+
+    # Two machines can show the same inherited-preamble share for opposite
+    # reasons, and they need opposite advice. Many tiny subagents means the
+    # preamble is being paid too often; few long ones means the preamble is
+    # simply large. Reported profile: median 39 turns per subagent, 2% at or
+    # under 5 -- "batch your small questions" targeted a population that
+    # barely existed there.
+    short = [t for t in sub_turns if t <= 5]
+    short_share = pct(len(short), len(sub_turns))
+    inherited = sum((x.floor or 0) * x.turns for x in subs)
+    sub_ctx = sum(sum(x.ctx_sizes) for x in subs)
+    inherited_share = pct(inherited, sub_ctx)
+
+    ev.append("median {:,} turns per subagent (p90 {:,}); {:.0f}% run 5 turns "
+              "or fewer".format(quantile(sub_turns, 0.5),
+                                quantile(sub_turns, 0.9), short_share))
+    if inherited_share:
+        ev.append("the inherited preamble is {:.0f}% of all subagent context"
+                  .format(inherited_share))
     ev.append("delegation keeps work out of the MAIN thread's history, which "
               "is real — but the subagent's own turns are billed")
+
+    actions = ["Delegate for context hygiene, not as a saving — measure both "
+               "sides before assuming a subagent is cheaper than doing it "
+               "inline."]
+    if short_share >= 15:
+        actions.append(
+            "{:.0f}% of your subagents run 5 turns or fewer, and each pays a "
+            "full preamble to answer briefly. Batch small questions into one "
+            "agent, or ask inline.".format(short_share))
+    elif inherited_share >= 20:
+        actions.append(
+            "Your subagents are not short (median {:,} turns), so batching "
+            "them is not the lever. The preamble each one inherits is — it is "
+            "{:.0f}% of all subagent context. See `preamble`."
+            .format(quantile(sub_turns, 0.5), inherited_share))
     return Finding(
         id="subagent-cost",
         title="Subagent traffic is a large share of spend",
         severity="medium", confidence="derived",
         saving_pct=0.0,
         evidence=ev,
-        actions=[
-            "Delegate for context hygiene, not as a saving — measure both "
-            "sides before assuming a subagent is cheaper than doing it inline.",
-            "A subagent spawned for a two-line answer pays a full preamble to "
-            "get it. Batch small questions into one agent, or ask inline.",
-        ])
+        actions=actions)
 
 
 DETECTORS = [

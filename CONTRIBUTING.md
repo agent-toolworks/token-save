@@ -90,6 +90,25 @@ configuration rather than a transcript, so no fixture fleet can reach it. If
 your detector needs an exemption too, say why in the same place — an exemption
 a reader can see is a different thing from a gap nobody noticed.
 
+## A failure mode worth naming
+
+Twice now a check has passed while testing nothing, and both times it looked
+exactly like a check that worked:
+
+- A fixture directory named after the thing being detected (`subagents/`),
+  asserted with an absolute-path substring test — so the assertion matched
+  every file, including ones it never really classified. Compare **relative to
+  the fixture root**, not against the absolute path.
+- A gate meant to discriminate between two machines that fired on both, because
+  the classifier behind it counted every multi-line script opening with `cd` as
+  a standalone `cd`. It looked like a working signal until it was measured on
+  a machine it was supposed to stay silent on.
+
+A sensor that silently matches everything reads identically to one that works.
+When you add a gate, assert **both** branches — the case that fires and the
+case that must not — and where possible check it against a real profile that
+should give the opposite answer.
+
 ## Style
 
 Match the surrounding code. Comments explain *why*, especially where a
