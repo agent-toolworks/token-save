@@ -101,13 +101,27 @@ otherwise.
 ### In your statusline
 
 ```sh
-ts now --statusline        # ->  370.4K +490/t clear>1t
+ts now --statusline        # ->  423K +530/t clear>1t
 ```
 
 Reads Claude Code's session JSON on stdin, so it follows the right transcript
 when several sessions are open. It never hangs, never writes to stderr and
 never exits non-zero, whatever it is handed — three things `scripts/verify`
 checks, because a statusline that can fail breaks the prompt.
+
+`scripts/statusline-snippet.sh` is a ready-made version. Use it as your whole
+statusline:
+
+```json
+{ "statusLine": { "type": "command",
+                  "command": "~/.claude/plugins/cache/agent-toolworks/token-save/*/scripts/statusline-snippet.sh" } }
+```
+
+or copy the block between the `BEGIN`/`END` markers into the statusline you
+already have, call `ts_segment "$input"` where you want it, and append the
+result only when it is non-empty. It resolves `ts` itself, bounds the call, and
+prints nothing at all if the plugin is absent, the transcript is unknown, or
+anything goes wrong — so adding it cannot break a prompt that works today.
 
 ## The catalogue gives different machines opposite advice
 

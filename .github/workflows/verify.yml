@@ -60,4 +60,4 @@ jobs:
       - name: shellcheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y shellcheck
-          shellcheck -S warning scripts/ts scripts/bootstrap scripts/verify
+          shellcheck -S warning scripts/ts scripts/bootstrap scripts/verify scripts/statusline-snippet.sh

@@ -119,6 +119,14 @@ mutually exclusive by construction and they answer exactly this question:
 `ts doctor --tools` reports whether such tools are installed. Presence is not a
 recommendation; only the measurement is.
 
+## Putting the signal in the statusline
+
+If the user wants the live number in front of them rather than on request,
+point them at `scripts/statusline-snippet.sh` in this plugin. It works as a
+whole statusline on its own, or the marked block can be pasted into an
+existing one. It degrades to printing nothing, so it cannot break a working
+prompt.
+
 ## Setup
 
 ```sh
