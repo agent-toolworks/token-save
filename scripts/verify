@@ -199,7 +199,34 @@ after=$(cat "$CLAUDE_CONFIG_DIR/settings.json")
   || bad "unparseable settings.json was overwritten"
 
 # ---------------------------------------------------------------------------
-head_ "4. LIVE SIGNAL  (ts now)"
+head_ "4. VERSIONS  (three places that must agree)"
+# ---------------------------------------------------------------------------
+# The CLI, the plugin manifest and the git tag are read by different consumers
+# and drift silently. A v0.2.0 tag once pointed at a manifest saying 0.1.0.
+vres=$(python3 - "$ROOT" <<'VERCHK'
+import json, os, re, subprocess, sys
+root = sys.argv[1]
+bad = []
+manifest = json.load(open(os.path.join(root, ".claude-plugin", "plugin.json")))["version"]
+cli = re.search(r'TS_VERSION="([^"]+)"', open(os.path.join(root, "scripts", "ts")).read()).group(1)
+if manifest != cli:
+    bad.append("plugin.json %s != scripts/ts %s" % (manifest, cli))
+tag = subprocess.run(["git", "-C", root, "tag", "--points-at", "HEAD"],
+                     capture_output=True, text=True).stdout.split()
+tags = [t.lstrip("v") for t in tag if t.startswith("v")]
+if tags and manifest not in tags:
+    bad.append("tag(s) %s at HEAD but plugin.json says %s" % (",".join(tags), manifest))
+print("|".join(bad))
+VERCHK
+)
+if [[ -z $vres ]]; then
+  ok "version agrees across plugin.json, scripts/ts and any tag at HEAD"
+else
+  bad "version drift" "${vres//|/$'\n        '}"
+fi
+
+# ---------------------------------------------------------------------------
+head_ "5. LIVE SIGNAL  (ts now)"
 # ---------------------------------------------------------------------------
 # Hand-derived, like the rest. Note the context of a turn is read+write+input
 # -- the whole prompt that request paid for -- not the read alone. The bulk
