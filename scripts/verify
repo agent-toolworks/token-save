@@ -211,11 +211,19 @@ manifest = json.load(open(os.path.join(root, ".claude-plugin", "plugin.json")))[
 cli = re.search(r'TS_VERSION="([^"]+)"', open(os.path.join(root, "scripts", "ts")).read()).group(1)
 if manifest != cli:
     bad.append("plugin.json %s != scripts/ts %s" % (manifest, cli))
-tag = subprocess.run(["git", "-C", root, "tag", "--points-at", "HEAD"],
-                     capture_output=True, text=True).stdout.split()
-tags = [t.lstrip("v") for t in tag if t.startswith("v")]
-if tags and manifest not in tags:
-    bad.append("tag(s) %s at HEAD but plugin.json says %s" % (",".join(tags), manifest))
+# Only compare against a tag when the tree is clean. Mid-release the
+# manifest is already bumped while HEAD still carries the PREVIOUS tag,
+# and a check that fails during the normal release flow is a check people
+# learn to ignore.
+dirty = subprocess.run(["git", "-C", root, "status", "--porcelain"],
+                       capture_output=True, text=True).stdout.strip()
+if not dirty:
+    tag = subprocess.run(["git", "-C", root, "tag", "--points-at", "HEAD"],
+                         capture_output=True, text=True).stdout.split()
+    tags = [t.lstrip("v") for t in tag if t.startswith("v")]
+    if tags and manifest not in tags:
+        bad.append("tag(s) %s at HEAD but plugin.json says %s"
+                   % (",".join(tags), manifest))
 print("|".join(bad))
 VERCHK
 )
