@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# verify — prove the numbers and the routing, against fixtures with known answers.
+#
+# Three things are checked, in order of how badly a regression would hurt:
+#
+#   1. ARITHMETIC  billed and content totals match values derived by hand in
+#                  fixtures/EXPECTATIONS.json. Nothing here was recorded from
+#                  program output.
+#   2. ROUTING     the two Bash detectors are mutually exclusive across two
+#                  deliberately opposite fleets. This is the central claim of
+#                  the tool; if it breaks, the tool is giving generic advice.
+#   3. SAFETY      malformed input degrades instead of crashing, and every
+#                  mechanical fix is idempotent and reversible.
+#
+# Usage: scripts/verify [--keep]
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TS="$ROOT/scripts/ts"
+FIX="$ROOT/fixtures"
+KEEP=0
+[[ ${1:-} == --keep ]] && KEEP=1
+
+PASS=0; FAIL=0; SKIP=0
+GREEN=$'\033[32m'; RED=$'\033[31m'; DIM=$'\033[2m'; YEL=$'\033[33m'; OFF=$'\033[0m'
+[[ -t 1 ]] || { GREEN=; RED=; DIM=; YEL=; OFF=; }
+
+ok()   { PASS=$((PASS+1)); printf '  %sPASS%s  %s\n' "$GREEN" "$OFF" "$1"; }
+bad()  { FAIL=$((FAIL+1)); printf '  %sFAIL%s  %s\n' "$RED" "$OFF" "$1";
+         [[ -n ${2:-} ]] && printf '        %s\n' "$2"; }
+skip() { SKIP=$((SKIP+1)); printf '  %sSKIP%s  %s %s\n' "$YEL" "$OFF" "$1" "${DIM}${2:-}${OFF}"; }
+head_() { printf '\n%s\n%s\n' "$1" "$(printf '%.0s-' {1..70})"; }
+
+command -v python3 >/dev/null 2>&1 || { echo "verify: python3 required"; exit 2; }
+
+TMP=$(mktemp -d)
+cleanup() { [[ $KEEP == 1 ]] || rm -rf "$TMP"; }
+trap cleanup EXIT
+
+# Fixtures are generated, not committed as opaque blobs, so a reader can see
+# exactly what produced the expected numbers.
+"$FIX/build-fixtures" --out "$TMP" >/dev/null || { echo "verify: could not build fixtures"; exit 2; }
+
+# ---------------------------------------------------------------------------
+head_ "1. ARITHMETIC  (against hand-derived expectations)"
+# ---------------------------------------------------------------------------
+for fleet in chatter bulk; do
+  out="$TMP/$fleet.json"
+  if ! "$TS" audit --root "$TMP/$fleet" --json >"$out" 2>"$TMP/$fleet.err"; then
+    bad "$fleet: audit --json failed" "$(head -3 "$TMP/$fleet.err")"
+    continue
+  fi
+  result=$(python3 - "$FIX/EXPECTATIONS.json" "$out" "$fleet" <<'PY'
+import json, sys
+exp = json.load(open(sys.argv[1]))[sys.argv[3]]
+got = json.load(open(sys.argv[2]))
+bad = []
+if got["turns"] != exp["turns"]:
+    bad.append("turns %s != %s" % (got["turns"], exp["turns"]))
+for k, v in exp["billed"].items():
+    if got["billed"].get(k) != v:
+        bad.append("billed.%s %s != %s" % (k, got["billed"].get(k), v))
+for k, v in exp["bash"].items():
+    g = got["bash"].get(k)
+    # Content sizes are tokenizer-dependent; allow 5% on those, exact on counts.
+    if k in ("calls",):
+        if g != v:
+            bad.append("bash.%s %s != %s" % (k, g, v))
+    elif v and abs(g - v) / v > 0.05:
+        bad.append("bash.%s %s not within 5%% of %s" % (k, g, v))
+print("|".join(bad))
+PY
+)
+  if [[ -z $result ]]; then
+    ok "$fleet: billed totals and Bash distribution match expectations"
+  else
+    bad "$fleet: expectation mismatch" "${result//|/$'\n        '}"
+  fi
+done
+
+# Amplification is the headline metric, so it gets its own check rather than
+# riding along inside a bundle where a wrong value could hide.
+amp=$("$TS" audit --root "$TMP/chatter" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["amplification"])')
+exp_amp=$(python3 -c 'print(round(25020000/51540,1))' 2>/dev/null)
+if python3 -c "import sys;sys.exit(0 if abs($amp-$exp_amp)/$exp_amp < 0.06 else 1)"; then
+  ok "chatter: amplification ${amp}x matches 25,020,000 reads / content"
+else
+  bad "chatter: amplification ${amp}x, expected ~${exp_amp}x"
+fi
+
+# ---------------------------------------------------------------------------
+head_ "2. ROUTING  (the same catalogue must give opposite advice)"
+# ---------------------------------------------------------------------------
+for fleet in chatter bulk; do
+  adv="$TMP/$fleet.advise.json"
+  if ! "$TS" advise --root "$TMP/$fleet" --json >"$adv" 2>/dev/null; then
+    bad "$fleet: advise --json failed"
+    continue
+  fi
+  result=$(python3 - "$FIX/EXPECTATIONS.json" "$adv" "$fleet" <<'PY'
+import json, sys
+exp = json.load(open(sys.argv[1]))[sys.argv[3]]
+got = json.load(open(sys.argv[2]))
+fired = {f["id"] for f in got["findings"]}
+bad = []
+for want in exp["fires"]:
+    if want not in fired:
+        bad.append("expected %s to fire" % want)
+for quiet in exp["silent"]:
+    if quiet in fired:
+        bad.append("expected %s to stay silent" % quiet)
+print("|".join(bad))
+PY
+)
+  if [[ -z $result ]]; then
+    ok "$fleet: fires ${DIM}$(python3 -c "import json;print(','.join(sorted(x['id'] for x in json.load(open('$adv'))['findings'])))")${OFF}"
+  else
+    bad "$fleet: wrong routing" "${result//|/$'\n        '}"
+  fi
+done
+
+# The claim is not just "each fires somewhere" but "they never fire together".
+both=$(python3 - "$TMP/chatter.advise.json" "$TMP/bulk.advise.json" <<'PY'
+import json, sys
+for p in sys.argv[1:]:
+    ids = {f["id"] for f in json.load(open(p))["findings"]}
+    if {"bash-chatter", "bash-bulk"} <= ids:
+        print("both fired in %s" % p)
+PY
+)
+[[ -z $both ]] && ok "bash-chatter and bash-bulk are mutually exclusive" \
+                || bad "the two Bash detectors overlap" "$both"
+
+# Severity must agree with the number it is derived from.
+sev=$(python3 - "$TMP/chatter.advise.json" <<'PY'
+import json, sys
+bad = []
+prev = None
+for f in json.load(open(sys.argv[1]))["findings"]:
+    if prev is not None and f["saving_pct"] > prev + 1e-9:
+        bad.append("findings not sorted by saving_pct")
+    prev = f["saving_pct"]
+    want = "high" if f["saving_pct"] >= 8 else "medium" if f["saving_pct"] >= 2.5 else "low"
+    if f["severity"] != want:
+        bad.append("%s: severity %s but %.1f%% implies %s"
+                   % (f["id"], f["severity"], f["saving_pct"], want))
+print("|".join(bad))
+PY
+)
+[[ -z $sev ]] && ok "severity is derived from estimated impact, findings sorted" \
+              || bad "severity/ranking incoherent" "${sev//|/$'\n        '}"
+
+# ---------------------------------------------------------------------------
+head_ "3. SAFETY  (degrade, never crash; fixes reversible)"
+# ---------------------------------------------------------------------------
+mkdir -p "$TMP/junk/proj"
+printf 'not json at all\n{"type":"assistant"\n{}\n' > "$TMP/junk/proj/broken.jsonl"
+if "$TS" audit --root "$TMP/junk" >/dev/null 2>"$TMP/junk.err"; then
+  bad "malformed transcript should exit non-zero (nothing to report)"
+else
+  if grep -qi traceback "$TMP/junk.err"; then
+    bad "malformed transcript produced a traceback" "$(head -3 "$TMP/junk.err")"
+  else
+    ok "malformed transcript degrades with a message, no traceback"
+  fi
+fi
+
+mkdir -p "$TMP/empty"
+"$TS" audit --root "$TMP/empty" >/dev/null 2>"$TMP/empty.err"
+grep -qi traceback "$TMP/empty.err" \
+  && bad "empty transcript root produced a traceback" \
+  || ok "empty transcript root reports cleanly"
+
+# Fixes run against a throwaway CLAUDE_CONFIG_DIR so a verify run can never
+# touch the operator's real configuration.
+export CLAUDE_CONFIG_DIR="$TMP/home"
+mkdir -p "$CLAUDE_CONFIG_DIR"
+for fid in terse-output tool-search; do
+  "$TS" fixes apply "$fid" --yes >/dev/null 2>&1
+  a=$("$TS" fixes show "$fid" 2>/dev/null | grep -c "applied" || true)
+  "$TS" fixes apply "$fid" --yes >"$TMP/second.$fid" 2>&1
+  "$TS" fixes revert "$fid" >/dev/null 2>&1
+  state=$("$TS" fixes show "$fid" 2>/dev/null | grep -c "not applied" || true)
+  if [[ $a -ge 1 && $state -ge 1 ]] && grep -qi "no change" "$TMP/second.$fid"; then
+    ok "fix $fid: applies, is idempotent, reverts"
+  else
+    bad "fix $fid: apply/idempotent/revert cycle broken" "$(cat "$TMP/second.$fid")"
+  fi
+done
+
+# A corrupt settings.json must be refused, not overwritten. This is the one
+# failure mode that would destroy user configuration.
+printf '{ this is not json' > "$CLAUDE_CONFIG_DIR/settings.json"
+before=$(cat "$CLAUDE_CONFIG_DIR/settings.json")
+"$TS" fixes apply tool-search --yes >/dev/null 2>&1
+after=$(cat "$CLAUDE_CONFIG_DIR/settings.json")
+[[ $before == "$after" ]] \
+  && ok "unparseable settings.json is refused, not overwritten" \
+  || bad "unparseable settings.json was overwritten"
+
+# ---------------------------------------------------------------------------
+printf '\n%s\n' "$(printf '%.0s-' {1..70})"
+printf '  %s%d passed%s   %s%d failed%s   %d skipped\n' \
+  "$GREEN" "$PASS" "$OFF" \
+  "$( ((FAIL)) && printf '%s' "$RED" )" "$FAIL" "$OFF" "$SKIP"
+[[ $KEEP == 1 ]] && printf '  %sfixtures kept in %s%s\n' "$DIM" "$TMP" "$OFF"
+printf '\n'
+exit $(( FAIL > 0 ))

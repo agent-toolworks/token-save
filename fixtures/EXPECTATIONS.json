@@ -1,0 +1,56 @@
+{
+  "_why": "Hand-derived from fixtures/build-fixtures, NOT recorded from program output. A self-test that records what the code printed only proves the code is deterministic. Each number below is reproducible with arithmetic shown in _derivation.",
+
+  "chatter": {
+    "_derivation": {
+      "turns": "3 sessions x 120 Bash calls = 360 assistant turns",
+      "cache_read": "per session ctx runs 10000,11000,..,129000 -> 120*10000 + 1000*(0+..+119) = 8,340,000; x3 = 25,020,000",
+      "cache_write": "1000 per turn x 360 = 360,000",
+      "output": "80 per turn x 360 = 28,800",
+      "bash_out_tokens": "100 tokens x 360 calls = 36,000",
+      "bash_out_median": "every output is the same size = 100"
+    },
+    "turns": 360,
+    "billed": {
+      "cache_read": 25020000,
+      "cache_write": 360000,
+      "input": 0,
+      "output": 28800
+    },
+    "bash": {
+      "calls": 360,
+      "out_tokens": 36000,
+      "out_median": 100,
+      "out_p90": 100,
+      "out_max": 100
+    },
+    "fires": ["bash-chatter"],
+    "silent": ["bash-bulk"]
+  },
+
+  "bulk": {
+    "_derivation": {
+      "turns": "3 sessions x 12 Bash calls = 36 assistant turns",
+      "cache_read": "per session ctx runs 10000,30000,..,230000 -> 12*10000 + 20000*(0+..+11) = 1,440,000; x3 = 4,320,000",
+      "cache_write": "20000 per turn x 36 = 720,000",
+      "output": "80 per turn x 36 = 2,880",
+      "bash_out_tokens": "20000 tokens x 36 calls = 720,000"
+    },
+    "turns": 36,
+    "billed": {
+      "cache_read": 4320000,
+      "cache_write": 720000,
+      "input": 0,
+      "output": 2880
+    },
+    "bash": {
+      "calls": 36,
+      "out_tokens": 720000,
+      "out_median": 20000,
+      "out_p90": 20000,
+      "out_max": 20000
+    },
+    "fires": ["bash-bulk"],
+    "silent": ["bash-chatter"]
+  }
+}

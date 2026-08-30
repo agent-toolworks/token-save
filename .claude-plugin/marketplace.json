@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "token-save-fleet",
+  "description": "Measure what your AI coding sessions cost, then act on advice derived from your own numbers",
+  "owner": {
+    "name": "Zvi Rahamim"
+  },
+  "plugins": [
+    {
+      "name": "token-save",
+      "description": "Measure what an AI coding session actually costs and get advice derived from your own transcripts — where the tokens went, which were re-read on every turn, and which fixes are worth making on this machine.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Zvi Rahamim"
+      },
+      "category": "productivity",
+      "source": "./",
+      "homepage": "https://github.com/OWNER/token-save-fleet"
+    }
+  ]
+}

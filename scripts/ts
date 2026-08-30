@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# ts — measure what your AI coding sessions actually cost, and what to do about it.
+#
+# One interface over four questions:
+#   audit   where the tokens went          (history)
+#   doctor  what is installed and set up   (present)
+#   advise  ranked fixes for YOUR numbers  (judgement)
+#   fixes   the few changes safe to script (action)
+#
+# python3 is the one hard requirement. Everything else — tiktoken, third-party
+# compressors — is optional and reported rather than assumed.
+set -euo pipefail
+
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  target=$(readlink "$SELF")
+  [[ $target == /* ]] && SELF=$target || SELF="$(dirname "$SELF")/$target"
+done
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+LIB="$ROOT/scripts/lib"
+
+TS_VERSION="0.1.0"
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+have_python() {
+  command -v python3 >/dev/null 2>&1
+}
+
+usage() {
+  cat <<'EOF'
+ts — what your AI coding sessions cost, and what to do about it
+
+USAGE
+  ts <command> [options]
+
+COMMANDS
+  audit            Where the tokens went. Billed vs content, and the
+                   amplification factor between them.
+  doctor           What is installed and configured on this machine.
+  advise           Run every detector against your numbers; rank what fires.
+  fixes            list | show <id> | apply <id> [--yes] | revert <id>
+  version          Print the version.
+
+COMMON OPTIONS  (audit, advise)
+  --project GLOB   Only sessions under this project directory.
+  --limit N        Only the N most recent sessions.
+  --root DIR       Transcript root (default ~/.claude/projects).
+  --json           Machine-readable output.
+
+START HERE
+  ts audit                 # the numbers
+  ts advise                # what they mean for you
+  ts fixes list            # what can be changed mechanically
+
+WHY THIS EXISTS
+  A token is not billed once. It is billed on every turn that re-reads it.
+  `ts audit` measures that multiplier on your own sessions; every
+  recommendation is ranked by it rather than by raw output size.
+
+  Which is why the advice differs per machine: the same catalogue tells one
+  person "install a Bash-output compressor" and the next "a compressor is
+  worthless here" — because it read their transcripts first.
+
+ENVIRONMENT
+  TS_TRANSCRIPT_DIR   Where transcripts live (default ~/.claude/projects).
+  CLAUDE_CONFIG_DIR   Claude Code config dir (default ~/.claude).
+  NO_COLOR            Disable colour.
+EOF
+}
+
+cmd=${1:-}
+[[ $# -gt 0 ]] && shift || true
+
+case "$cmd" in
+  ""|-h|--help|help)
+    usage
+    ;;
+  version|--version|-V)
+    printf 'ts %s\n' "$TS_VERSION"
+    ;;
+  audit)
+    have_python || die "ts: python3 is required and was not found on PATH"
+    exec python3 "$LIB/audit.py" "$@"
+    ;;
+  doctor)
+    have_python || die "ts: python3 is required and was not found on PATH"
+    exec python3 "$LIB/cmd_doctor.py" "$@"
+    ;;
+  advise)
+    have_python || die "ts: python3 is required and was not found on PATH"
+    exec python3 "$LIB/cmd_advise.py" "$@"
+    ;;
+  fixes)
+    have_python || die "ts: python3 is required and was not found on PATH"
+    exec python3 "$LIB/fixes.py" "$@"
+    ;;
+  *)
+    die "ts: unknown command '$cmd' (try: ts --help)"
+    ;;
+esac

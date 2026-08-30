@@ -1,0 +1,56 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the floor because it is what ships on current macOS, and the
+        # tool must run on a bare system python. 3.13 catches anything that
+        # depends on removed behaviour.
+        python: ["3.9", "3.13"]
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: bootstrap --check
+        run: scripts/bootstrap --check
+
+      - name: verify (estimator path — no tiktoken)
+        run: scripts/verify
+
+      - name: install tiktoken
+        continue-on-error: true
+        run: pip install tiktoken
+
+      - name: verify (exact tokenizer path)
+        run: scripts/verify
+
+      - name: smoke — commands run and produce output
+        run: |
+          scripts/ts version
+          scripts/ts --help > /dev/null
+          fixtures/build-fixtures --out "$RUNNER_TEMP/fx"
+          scripts/ts audit  --root "$RUNNER_TEMP/fx/chatter" > /dev/null
+          scripts/ts advise --root "$RUNNER_TEMP/fx/bulk" --all > /dev/null
+          scripts/ts audit  --root "$RUNNER_TEMP/fx/bulk" --json | python -c 'import json,sys; json.load(sys.stdin)'
+          scripts/ts fixes list > /dev/null
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shellcheck -S warning scripts/ts scripts/bootstrap scripts/verify

@@ -1,0 +1,11 @@
+# Generated fixture fleets — rebuild with fixtures/build-fixtures
+fixtures/chatter/
+fixtures/bulk/
+
+# Backups written by `ts fixes`
+*.ts-backup-*
+
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
