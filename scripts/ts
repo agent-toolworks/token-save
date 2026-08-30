@@ -19,7 +19,7 @@ done
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 LIB="$ROOT/scripts/lib"
 
-TS_VERSION="0.3.1"
+TS_VERSION="0.3.2"
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 

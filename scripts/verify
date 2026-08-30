@@ -33,6 +33,22 @@ head_() { printf '\n%s\n%s\n' "$1" "$(printf '%.0s-' {1..70})"; }
 
 command -v python3 >/dev/null 2>&1 || { echo "verify: python3 required"; exit 2; }
 
+# timeout(1) is GNU coreutils and is NOT on a stock macOS -- the checks below
+# exist precisely to catch a hang, so dropping the bound is not an option.
+# perl's alarm is present on every platform this runs on. (Caught by CI: the
+# whole ts-now section failed on macos-latest while passing on a dev Mac that
+# happened to have brew coreutils installed.)
+bounded() {
+  local secs=$1; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  else
+    perl -e 'my $s = shift; alarm $s; exec @ARGV or exit 127' "$secs" "$@"
+  fi
+}
+
 TMP=$(mktemp -d)
 cleanup() { [[ $KEEP == 1 ]] || rm -rf "$TMP"; }
 trap cleanup EXIT
@@ -281,7 +297,7 @@ with open(sys.argv[1], "w") as fh:
         fh.write(json.dumps(r) + "\n")
 MKLEAK
 
-if timeout 90 "$TS" share --root "$TMP/leak" --show >"$TMP/share.json" 2>"$TMP/share.err"; then
+if bounded 90 "$TS" share --root "$TMP/leak" --show >"$TMP/share.json" 2>"$TMP/share.err"; then
   hits=$(grep -o "CANARY7f3a\|CANARYPROJECT\|CANARYSESSION" "$TMP/share.json" | sort -u | tr '\n' ' ')
   if [[ -z $hits ]]; then
     ok "ts share: planted paths, commands, results and MCP names all redacted"
@@ -305,7 +321,7 @@ head_ "6. LIVE SIGNAL  (ts now)"
 # Break-even is then 1.25*30000 / (0.10*(250000-30000)) = 1.7045 turns.
 # (Getting this wrong the first time is exactly what this check is for.)
 sess=$(ls "$TMP"/bulk/proj-bulk/*.jsonl | head -1)
-if timeout 60 "$TS" now --session "$sess" --json >"$TMP/now.json" 2>/dev/null; then
+if bounded 60 "$TS" now --session "$sess" --json >"$TMP/now.json" 2>/dev/null; then
   res=$(python3 - "$TMP/now.json" <<'NOWCHK'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -341,7 +357,7 @@ with open(sys.argv[1], "w") as fh:
         fh.write(json.dumps({"type": "assistant", "message": {
             "role": "assistant", "content": [], "usage": u}}) + "\n")
 MKFRESH
-be=$(timeout 60 "$TS" now --session "$fresh" --json 2>/dev/null \
+be=$(bounded 60 "$TS" now --session "$fresh" --json 2>/dev/null \
      | python3 -c 'import json,sys;print(json.load(sys.stdin)["breakeven_turns"])')
 if [[ $be == None ]]; then
   ok "ts now: a session at its preamble reports no gain from clearing"
@@ -367,7 +383,7 @@ with open(sys.argv[1], "w") as fh:
     for r in recs:
         fh.write(json.dumps(r) + "\n")
 MKBURST
-g=$(timeout 30 "$TS" now --session "$burst" --json 2>/dev/null \
+g=$(bounded 30 "$TS" now --session "$burst" --json 2>/dev/null \
     | python3 -c 'import json,sys;print(int(round(json.load(sys.stdin)["growth_per_turn"])))')
 if [[ $g == 500 ]]; then
   ok "ts now: growth survives a zero-inflated series (500/turn, not 0)"
@@ -384,7 +400,7 @@ for label in empty garbage missing; do
     garbage) payload="not json {{{" ;;
     missing) payload='{"transcript_path":"/nonexistent/x.jsonl"}' ;;
   esac
-  if printf '%s' "$payload" | timeout 20 "$TS" now --statusline >"$TMP/sl.out" 2>"$TMP/sl.err"; then
+  if printf '%s' "$payload" | bounded 20 "$TS" now --statusline >"$TMP/sl.out" 2>"$TMP/sl.err"; then
     if [[ -s "$TMP/sl.err" ]]; then
       bad "ts now --statusline ($label stdin) wrote to stderr" "$(head -2 "$TMP/sl.err")"
     else

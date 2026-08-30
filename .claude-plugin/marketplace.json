@@ -9,7 +9,7 @@
     {
       "name": "token-save",
       "description": "Measure what an AI coding session actually costs and get advice derived from your own transcripts — where the tokens went, which were re-read on every turn, and which fixes are worth making on this machine.",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "author": {
         "name": "Zvi Rahamim"
       },
