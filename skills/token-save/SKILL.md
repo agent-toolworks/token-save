@@ -44,6 +44,8 @@ Every recommendation `ts advise` makes is ranked by this, not by raw size.
 
 | Question | Command |
 |---|---|
+| What is this session costing right now? | `ts now` |
+| ...as a statusline fragment | `ts now --statusline` |
 | Where did my tokens go? | `ts audit` |
 | ...for one project only | `ts audit --project '*myrepo*'` |
 | ...the heaviest sessions | `ts audit --sessions` |
@@ -58,6 +60,15 @@ Every recommendation `ts advise` makes is ranked by this, not by raw size.
 
 Add `--json` to `audit`, `advise` and `doctor` when you need to compute on the
 output rather than show it.
+
+## When the user asks about the session they are in
+
+Use `ts now`, not `ts audit`. It reports the current context, the growth rate,
+and how many turns until clearing pays for itself.
+
+Report the break-even plainly and then stop. It is arithmetic on size, and it
+cannot know whether the context is still needed — say that, and leave the
+decision with the user rather than telling them to clear.
 
 ## How to use it in a conversation
 

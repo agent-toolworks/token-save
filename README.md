@@ -52,6 +52,7 @@ Nothing is sent anywhere. There is no network code in this repository.
 
 | Question | Command |
 |---|---|
+| What is *this* session costing me right now? | `ts now` |
 | Where did my tokens go? | `ts audit` |
 | ...one project only | `ts audit --project '*myrepo*'` |
 | ...heaviest sessions | `ts audit --sessions` |
@@ -63,6 +64,47 @@ Nothing is sent anywhere. There is no network code in this repository.
 | Preview / apply / undo one | `ts fixes show\|apply\|revert <id>` |
 
 `--json` on `audit`, `advise` and `doctor` for machine-readable output.
+
+## The live signal
+
+`ts audit` is a post-mortem: by the time it reports a 1,126-turn session, the
+money is spent. `ts now` answers the same question early enough to act on, plus
+one a post-mortem cannot — **would clearing right now pay for itself?**
+
+```
+  context now      370,438 tokens    carrying 11x its preamble
+  growth           +490 tokens/turn  median of the last 20 turns
+  of that          64% was re-reading
+
+  clearing now breaks even after 1.2 turns
+```
+
+That is arithmetic, not a rule of thumb. Carrying C tokens costs `C*r` every
+turn; clearing costs the preamble once as a write (`F*w`) and then `F*r` per
+turn. New work costs the same either way, so the growth term cancels and the
+whole comparison is:
+
+```
+N* = (w * F) / (r * (C - F))       Anthropic w=1.25, r=0.10  ->  12.5F / (C-F)
+```
+
+A session carrying ten times its preamble breaks even in **under two turns** —
+much sooner than most people's instinct, which is the point of showing it live.
+
+What the arithmetic cannot know is whether the context is still *needed*. That
+is your call, and the output says so every time instead of pretending
+otherwise.
+
+### In your statusline
+
+```sh
+ts now --statusline        # ->  370.4K +490/t clear>1t
+```
+
+Reads Claude Code's session JSON on stdin, so it follows the right transcript
+when several sessions are open. It never hangs, never writes to stderr and
+never exits non-zero, whatever it is handed — three things `scripts/verify`
+checks, because a statusline that can fail breaks the prompt.
 
 ## The catalogue gives different machines opposite advice
 

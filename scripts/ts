@@ -37,6 +37,8 @@ USAGE
 COMMANDS
   audit            Where the tokens went. Billed vs content, and the
                    amplification factor between them.
+  now              What the session you are in is costing, and whether
+                   clearing it right now would pay for itself.
   doctor           What is installed and configured on this machine.
   advise           Run every detector against your numbers; rank what fires.
   fixes            list | show <id> | apply <id> [--yes] | revert <id>
@@ -51,6 +53,7 @@ COMMON OPTIONS  (audit, advise)
 START HERE
   ts audit                 # the numbers
   ts advise                # what they mean for you
+  ts now                   # what THIS session is costing, right now
   ts fixes list            # what can be changed mechanically
 
 WHY THIS EXISTS
@@ -82,6 +85,10 @@ case "$cmd" in
   audit)
     have_python || die "ts: python3 is required and was not found on PATH"
     exec python3 "$LIB/audit.py" "$@"
+    ;;
+  now)
+    have_python || die "ts: python3 is required and was not found on PATH"
+    exec python3 "$LIB/cmd_now.py" "$@"
     ;;
   doctor)
     have_python || die "ts: python3 is required and was not found on PATH"

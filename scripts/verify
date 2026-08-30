@@ -199,6 +199,80 @@ after=$(cat "$CLAUDE_CONFIG_DIR/settings.json")
   || bad "unparseable settings.json was overwritten"
 
 # ---------------------------------------------------------------------------
+head_ "4. LIVE SIGNAL  (ts now)"
+# ---------------------------------------------------------------------------
+# Hand-derived, like the rest. Note the context of a turn is read+write+input
+# -- the whole prompt that request paid for -- not the read alone. The bulk
+# fixture's last turn reads 230,000 and writes 20,000, so context is 250,000;
+# its first five turns bottom out at 10,000+20,000 = 30,000, the preamble.
+# Break-even is then 1.25*30000 / (0.10*(250000-30000)) = 1.7045 turns.
+# (Getting this wrong the first time is exactly what this check is for.)
+sess=$(ls "$TMP"/bulk/proj-bulk/*.jsonl | head -1)
+if timeout 60 "$TS" now --session "$sess" --json >"$TMP/now.json" 2>/dev/null; then
+  res=$(python3 - "$TMP/now.json" <<'NOWCHK'
+import json, sys
+d = json.load(open(sys.argv[1]))
+bad = []
+if d["turns"] != 12:      bad.append("turns %s != 12" % d["turns"])
+if d["context"] != 250000: bad.append("context %s != 250000" % d["context"])
+if d["floor"] != 30000:   bad.append("floor %s != 30000" % d["floor"])
+want = (1.25 * 30000) / (0.10 * (250000 - 30000))
+if abs(d["breakeven_turns"] - want) > 1e-6:
+    bad.append("breakeven %.4f != %.4f" % (d["breakeven_turns"], want))
+print("|".join(bad))
+NOWCHK
+)
+  if [[ -z $res ]]; then
+    ok "ts now: context, preamble and break-even match hand arithmetic"
+  else
+    bad "ts now: wrong arithmetic" "${res//|/$'\n        '}"
+  fi
+else
+  bad "ts now --json failed or timed out"
+fi
+
+# A session still at its preamble has nothing to gain, and must say so rather
+# than printing a number that nags someone to clear a fresh session.
+fresh="$TMP/fresh/proj/fresh.jsonl"
+mkdir -p "$(dirname "$fresh")"
+python3 - "$fresh" <<'MKFRESH'
+import json, sys
+u = {"input_tokens": 0, "cache_creation_input_tokens": 0,
+     "cache_read_input_tokens": 10000, "output_tokens": 10}
+with open(sys.argv[1], "w") as fh:
+    for _ in range(6):
+        fh.write(json.dumps({"type": "assistant", "message": {
+            "role": "assistant", "content": [], "usage": u}}) + "\n")
+MKFRESH
+be=$(timeout 60 "$TS" now --session "$fresh" --json 2>/dev/null \
+     | python3 -c 'import json,sys;print(json.load(sys.stdin)["breakeven_turns"])')
+if [[ $be == None ]]; then
+  ok "ts now: a session at its preamble reports no gain from clearing"
+else
+  bad "ts now: expected null break-even at the preamble, got $be"
+fi
+
+# --statusline runs inside a prompt: it must never hang, never write to stderr
+# and never exit non-zero, whatever it is handed. The first version of this
+# command hung forever on an idle stdin pipe, which is why this loop exists.
+for label in empty garbage missing; do
+  case $label in
+    empty)   payload="" ;;
+    garbage) payload="not json {{{" ;;
+    missing) payload='{"transcript_path":"/nonexistent/x.jsonl"}' ;;
+  esac
+  if printf '%s' "$payload" | timeout 20 "$TS" now --statusline >"$TMP/sl.out" 2>"$TMP/sl.err"; then
+    if [[ -s "$TMP/sl.err" ]]; then
+      bad "ts now --statusline ($label stdin) wrote to stderr" "$(head -2 "$TMP/sl.err")"
+    else
+      ok "ts now --statusline: $label stdin handled silently"
+    fi
+  else
+    bad "ts now --statusline ($label stdin) hung or exited non-zero"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 printf '\n%s\n' "$(printf '%.0s-' {1..70})"
 printf '  %s%d passed%s   %s%d failed%s   %d skipped\n' \
   "$GREEN" "$PASS" "$OFF" \
