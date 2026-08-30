@@ -4,6 +4,36 @@ The useful contribution here is usually **a new detector**, because a detector
 encodes a cost pattern somebody actually hit. If your machine wastes tokens in
 a way this tool cannot see, that gap is the bug.
 
+## Reporting
+
+One issue per thing, please — items get closed and prioritised independently.
+Two templates:
+
+- **Bug** — a number or behaviour is wrong.
+- **A detector is wrong for my machine** — the measurement may be right and the
+  advice still wrong. This is the most valuable report this project takes, and
+  it has its own template because it is not quite a bug. See below.
+
+Attach `ts share --show` where you can. It is shape only — distributions,
+counts, which detectors fired, no paths or contents — and cross-machine
+comparison is the single thing that has found every real bug here so far.
+
+## Why "the advice is wrong for me" is a first-class report
+
+The design claim is that the same catalogue gives different machines different,
+sometimes opposite, advice. Every time that has failed, it failed on an axis
+invisible from a transcript:
+
+- Batching Bash calls saves tokens, and costs an approval prompt per chained
+  call on a machine with a prefix-matched allowlist. `bash-chatter` recommended
+  the regression.
+- "Batch small questions into fewer subagents" targeted a population that did
+  not exist on a machine whose subagents ran 39 turns each.
+
+Naming that axis is the contribution. Fixing it usually means a **gate**, and a
+gate needs a signal visible in the transcripts — see the failure mode below
+before proposing one.
+
 ## Ground rules
 
 1. **Measure, then advise.** A detector reads numbers and either fires with a
