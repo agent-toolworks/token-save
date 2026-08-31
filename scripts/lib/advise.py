@@ -396,23 +396,41 @@ def d_session_length(fleet, mach):
     # which is measured per session, not guessed. A comment here previously
     # claimed "roughly three quarters" while the code applied 0.35; neither
     # was derived from anything.
+    # The fraction above describes how much CONTEXT RE-READING shrinks, so it
+    # may only be applied to the cache-read component. It was applied to
+    # cost_units -- reads plus cache writes plus output -- and neither of the
+    # other two shrinks when a session is split: the same work produces the
+    # same assistant output, just across two sessions, and output is billed at
+    # 5x so it carried weight far out of proportion to its token count. Cache
+    # writes go slightly the wrong way, since the second session writes one
+    # more preamble. Measured over 77 heavy sessions on the reporting machine
+    # that was a 1.44x over-statement: 21.1% claimed against 14.6% real.
+    #
+    # Routed through to_spend() rather than multiplying by PRICE["cache_read"]
+    # here, because this detector was the one caller that bypassed the shared
+    # helper -- which is exactly the drift its own docstring warns about.
     heavy = sorted(subs, key=lambda s: -s.cost_units)[:max(1, len(subs) // 4)]
     heavy_cost = sum(s.cost_units for s in heavy)
     heavy_share = pct(heavy_cost, fleet.cost_units())
-    saved = 0.0
+    all_reads = fleet.billed()["cache_read"]
+    saved_reads = 0.0
     for h in heavy:
         F, P = float(h.floor or 0), float(h.peak or 0)
         if F > 0 and P > F:
-            saved += h.cost_units * ((P - F) / (2.0 * (F + P)))
-    derived_pct = pct(saved, fleet.cost_units())
-    ev.append("splitting the heaviest %d session(s) in half would save about "
-              "%.0f%% of total spend, from their own measured shape"
-              % (len(heavy), derived_pct))
+            saved_reads += h.billed["cache_read"] * ((P - F) / (2.0 * (F + P)))
+    derived_pct = to_spend(fleet, pct(saved_reads, all_reads)) if all_reads else 0.0
+    ev.append("splitting the heaviest {} session(s) in half would cut ~{:,} "
+              "cache-read tokens = about {:.0f}% of total spend, from their own "
+              "measured shape".format(len(heavy), int(saved_reads), derived_pct))
+    ev.append("only re-reading shrinks: the same work produces the same output "
+              "across two sessions, and the split adds one preamble write")
     return Finding(
         id="session-length",
         title="Long sessions dominate spend",
         severity=sev, confidence="derived",
-        assumption="each heavy session split once at its midpoint",
+        assumption="each heavy session split once at its midpoint; only "
+                   "cache reads shrink, output is unchanged and the split "
+                   "adds one preamble write, which is not subtracted",
         saving_pct=derived_pct,
         gate=gate,
         evidence=ev,

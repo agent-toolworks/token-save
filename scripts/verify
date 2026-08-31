@@ -816,6 +816,125 @@ SCOPE
 [[ $scope == CLEAR ]] && ok "preamble saving is scoped to the attributable part" \
                       || bad "preamble saving scope wrong" "${scope//|/$'\n        '}"
 
+# session-length's fraction describes how much CONTEXT RE-READING shrinks, so
+# it may only be applied to the cache-read component. It was applied to
+# cost_units -- reads plus writes plus output -- and splitting a session
+# reduces neither of the other two: the same work produces the same output
+# across two sessions, and the split adds a preamble write. 1.44x over-stated
+# on the reporting machine, 1.28x here.
+#
+# Checked by the property the bug breaks rather than by the arithmetic. Two
+# fleets with IDENTICAL context shapes and different output volume: the tokens
+# saved are the same, so the share of spend must FALL as output grows. Applied
+# to cost_units it barely moves, because numerator and denominator grow
+# together.
+base=$(python3 - "$TMP" "$ROOT" <<'BASE'
+import json, os, sys
+sys.path.insert(0, os.path.join(sys.argv[2], "scripts", "lib"))
+import advise, machine
+from transcripts import Fleet
+
+tmp = sys.argv[1]
+mach = machine.collect()
+
+
+def build(root, out_tokens):
+    d = os.path.join(root, "proj")
+    os.makedirs(d, exist_ok=True)
+    for n in range(4):
+        with open(os.path.join(d, "s%d.jsonl" % n), "w") as fh:
+            ctx = 20000
+            for _ in range(100):
+                fh.write(json.dumps({"type": "assistant", "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "alpha beta gamma"}],
+                    "usage": {"input_tokens": 0,
+                              "cache_creation_input_tokens": 0,
+                              "cache_read_input_tokens": ctx,
+                              "output_tokens": out_tokens}}}) + "\n")
+                ctx += 1800
+
+
+def saving(out_tokens, tag):
+    root = os.path.join(tmp, "base-%s" % tag)
+    build(root, out_tokens)
+    for f in advise.run(Fleet.load(root=root), mach):
+        if f.id == "session-length":
+            return f.saving_pct
+    return None
+
+
+lo = saving(10, "lo")       # almost no output: spend is nearly all reads
+hi = saving(9000, "hi")     # output-heavy: same reads, much larger bill
+bad = []
+if lo is None or hi is None:
+    bad.append("session-length did not fire on the synthetic fleets "
+               "(lo=%r hi=%r)" % (lo, hi))
+else:
+    if hi >= lo:
+        bad.append("saving did not fall when output grew (lo %.2f%%, hi %.2f%%)"
+                   " -- the fraction is still being applied to total spend"
+                   % (lo, hi))
+    elif lo / hi < 1.5:
+        bad.append("saving barely moved with output (lo %.2f%%, hi %.2f%%, "
+                   "ratio %.2f) -- expected the output-heavy fleet to be much "
+                   "lower" % (lo, hi, lo / hi))
+print("|".join(bad) if bad else "CLEAR lo=%.1f%% hi=%.1f%%" % (lo, hi))
+BASE
+)
+if [[ $base == CLEAR* ]]; then
+  ok "session-length saving scales with cache reads, not total spend ${DIM}(${base#CLEAR })${OFF}"
+else
+  bad "session-length applies its fraction to the wrong base" \
+      "${base//|/$'\n        '}"
+fi
+
+# The correction belongs in the shared helper, not hand-inlined: session-length
+# was the one caller that bypassed to_spend(), which is the drift that helper's
+# own docstring warns about. Every detector's saving must be 0, or routed
+# through to_spend(), or built from the cost-weighted OUTPUT component -- which
+# is a different component being reduced, and correct for that reason.
+helper=$(python3 - "$ROOT" <<'HELP'
+import os, re, sys
+src = open(os.path.join(sys.argv[1], "scripts", "lib", "advise.py")).read()
+bad = []
+
+
+def resolves_ok(expr, depth=0):
+    """Accept a saving that is zero, routed through to_spend(), or built from
+    the cost-weighted OUTPUT component -- a different component being reduced,
+    and correct for that reason.
+
+    Detectors name an intermediate before returning it, so one level of
+    indirection is followed: a bare `derived_pct` is judged by wherever
+    `derived_pct` was assigned.
+    """
+    flat = " ".join(expr.split())
+    if flat in ("0.0", "0"):
+        return True
+    if "to_spend(" in flat or "out_share" in flat or 'PRICE["output"]' in flat:
+        return True
+    if depth > 2:
+        return False
+    for name in set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", flat)):
+        for a in re.finditer(r"^\s*%s\s*=\s*(.+)$" % re.escape(name), src, re.M):
+            if resolves_ok(a.group(1), depth + 1):
+                return True
+    return False
+
+
+for m in re.finditer(r"saving_pct=(.*?),\n", src, re.S):
+    if not resolves_ok(m.group(1)):
+        bad.append("a saving is computed as %r, which is neither to_spend() "
+                   "nor the output component"
+                   % " ".join(m.group(1).split())[:70])
+print("|".join(bad) if bad else "CLEAR")
+HELP
+)
+[[ $helper == CLEAR ]] && ok "every saving routes through to_spend() or the output component" \
+                       || bad "a detector bypasses the shared conversion" \
+                              "${helper//|/$'\n        '}"
+
 # chatter/bulk cover the two Bash detectors and both cover preamble and
 # session-length, which every long fixture trips.
 covered+=(bash-chatter bash-bulk preamble session-length)
