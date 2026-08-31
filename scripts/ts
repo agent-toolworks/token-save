@@ -58,7 +58,8 @@ COMMON OPTIONS  (audit, advise)
 
 ADVISE OPTIONS
   --all            Also list the detectors that stayed silent.
-  --only ID        Run a single detector by id.
+  --only IDS       Restrict the report to these detector ids, comma-separated.
+                   An unknown id is an error, not an empty report.
 
 START HERE
   ts audit                 # the numbers

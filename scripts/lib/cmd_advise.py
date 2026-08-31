@@ -6,6 +6,7 @@ Usage: cmd_advise.py [--project GLOB] [--limit N] [--all] [--json] [--only ID]
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import sys
@@ -18,12 +19,20 @@ import report as R  # noqa: E402
 from transcripts import Fleet, tokenizer_name  # noqa: E402
 
 
-def _render(findings, fleet, show_all: bool, blocked=()) -> None:
-    if not findings:
-        print("\n  " + R.green("nothing fired.")
-              + " Every detector read your numbers and stayed quiet.")
-        print("  " + R.dim("that is a real result, not an empty report — see "
-                           "`ts advise --all` for the full catalogue"))
+def _render(findings, fleet, show_all: bool, blocked=(), only=None) -> None:
+    if not findings and not blocked:
+        if only:
+            # Do not claim every detector read the numbers when only some ran.
+            print("\n  " + R.green("nothing fired")
+                  + " among the %d detector(s) you selected: %s"
+                  % (len(only), ", ".join(only)))
+            print("  " + R.dim("the rest of the catalogue was not reported — "
+                               "drop --only to see it"))
+        else:
+            print("\n  " + R.green("nothing fired.")
+                  + " Every detector read your numbers and stayed quiet.")
+            print("  " + R.dim("that is a real result, not an empty report — "
+                               "see `ts advise --all` for the full catalogue"))
         return
 
     top = max(f.saving_pct for f in findings)
@@ -96,7 +105,8 @@ def main(argv=None) -> int:
     ap.add_argument("--root", help="transcript root")
     ap.add_argument("--all", action="store_true",
                     help="also list the detectors that stayed silent")
-    ap.add_argument("--only", help="run a single detector by id")
+    ap.add_argument("--only", help="restrict the report to these detector ids "
+                                   "(comma-separated). Unknown ids are an error")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -108,8 +118,35 @@ def main(argv=None) -> int:
     mach = machine.collect()
 
     findings, blocked = advise.evaluate(fleet, mach)
+
+    # `silent` is computed BEFORE the filter, or a detector that fired and was
+    # filtered out would be reported as having stayed quiet -- the same
+    # not-measured-versus-measured-zero confusion this flag already had.
+    fired_ids = {f.id for f in findings}
+    blocked_ids = {u.id for u in blocked}
+    silent_ids = [k for k in advise.CATALOGUE
+                  if k not in fired_ids and k not in blocked_ids]
+
+    only = None
     if args.only:
-        findings = [f for f in findings if f.id == args.only]
+        only = [x.strip() for x in args.only.split(",") if x.strip()]
+        unknown = [x for x in only if x not in advise.CATALOGUE]
+        if unknown:
+            # An unmatched filter meant nothing ran and the report said
+            # "nothing fired ... that is a real result, not an empty report" --
+            # a sentence written to prevent exactly this misreading, printed
+            # unconditionally, turning a typo into a confident all-clear. And
+            # --json listed every detector as silent, so a CI check or a
+            # collected profile recorded negative results never measured.
+            for bad_id in unknown:
+                near = difflib.get_close_matches(bad_id, advise.CATALOGUE, 1, 0.6)
+                sys.stderr.write("ts advise: unknown detector %r%s\n" % (
+                    bad_id, "; did you mean %r?" % near[0] if near else ""))
+            sys.stderr.write("valid ids: %s\n" % ", ".join(sorted(advise.CATALOGUE)))
+            return 2
+        findings = [f for f in findings if f.id in only]
+        blocked = [u for u in blocked if u.id in only]
+        silent_ids = [k for k in silent_ids if k in only]
 
     if args.json:
         print(json.dumps({
@@ -149,9 +186,7 @@ def main(argv=None) -> int:
             # `silent` means checked and quiet. A detector that could not run
             # is listed apart, with why -- being unable to check is not the
             # same as having checked and found nothing.
-            "silent": [k for k in advise.CATALOGUE
-                       if k not in {f.id for f in findings}
-                       and k not in {u.id for u in blocked}],
+            "silent": silent_ids,
             "unevaluated": [{"id": u.id, "reason": u.reason} for u in blocked],
         }, indent=1))
         return 0
@@ -166,7 +201,7 @@ def main(argv=None) -> int:
                     " + %d subagent transcripts" % subn if subn else "",
                     "{:,}".format(fleet.turns()),
                     fleet.amplification(), tokenizer_name())))
-    _render(findings, fleet, args.all, blocked)
+    _render(findings, fleet, args.all, blocked, only)
     print()
     return 0
 

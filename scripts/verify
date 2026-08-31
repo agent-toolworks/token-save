@@ -1418,6 +1418,73 @@ RR
 [[ $rr == CLEAR ]] && ok "repeat-reads: distinct ranges and separate sessions are not copies" \
                    || bad "repeat-reads counts non-copies" "${rr//|/$'\n        '}"
 
+# `--only` accepted any string. An unmatched filter ran nothing and the report
+# said "nothing fired ... that is a real result, not an empty report" -- a
+# sentence written to prevent exactly that misreading, printed unconditionally,
+# so a typo became a confident all-clear. --json was worse: it listed every
+# detector as `silent`, so a CI check or a collected profile recorded a dozen
+# negative results that were never measured. This is the same measured-zero vs
+# failed-to-look distinction the rest of the tool gets right.
+onlyf=$(python3 - "$TMP" "$ROOT" <<'ONLY'
+import json, os, subprocess, sys
+sys.path.insert(0, os.path.join(sys.argv[2], "scripts", "lib"))
+import advise
+
+tmp, root = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+fleet_root = os.path.join(tmp, "chatter")
+bad = []
+
+
+def run(*args):
+    return subprocess.run([ts, "advise", "--root", fleet_root] + list(args),
+                          capture_output=True, text=True)
+
+# An unknown id must be a hard error, not a clean bill of health.
+for bogus in ("nope-not-real", "bash_chatter", "bash-chatter,nope"):
+    r = run("--only", bogus)
+    if r.returncode != 2:
+        bad.append("--only %r exited %d, expected 2" % (bogus, r.returncode))
+    if "nothing fired" in r.stdout:
+        bad.append("--only %r reported a clean bill of health" % bogus)
+    if bogus.startswith("bash_") and "bash-chatter" not in r.stderr:
+        bad.append("--only %r did not suggest the near miss" % bogus)
+    if "valid ids" not in r.stderr:
+        bad.append("--only %r did not list the valid ids" % bogus)
+
+# A comma-separated list is the flag's natural use and must work.
+r = run("--only", "bash-chatter,preamble", "--json")
+if r.returncode != 0:
+    bad.append("a comma-separated --only exited %d" % r.returncode)
+else:
+    ids = {f["id"] for f in json.loads(r.stdout)["findings"]}
+    if not ids <= {"bash-chatter", "preamble"}:
+        bad.append("comma list returned unrelated findings: %r" % sorted(ids))
+    if not ids:
+        bad.append("comma list returned nothing; the fixture should fire both")
+
+# `silent` must never claim a detector stayed quiet when it fired and was
+# merely filtered out -- it was computed after the filter.
+full = json.loads(run("--json").stdout)
+fired = {f["id"] for f in full["findings"]}
+if not fired:
+    bad.append("the fixture fired nothing; this check proves nothing")
+one = sorted(fired)[0]
+other = sorted(fired - {one})
+sub = json.loads(run("--only", one, "--json").stdout)
+for f_id in other:
+    if f_id in sub["silent"]:
+        bad.append("--only %s lists %s as silent, though it fired"
+                   % (one, f_id))
+if set(sub["silent"]) - {one}:
+    bad.append("--only %s reports detectors outside the filter as silent: %r"
+               % (one, sub["silent"]))
+print("|".join(bad) if bad else "CLEAR")
+ONLY
+)
+[[ $onlyf == CLEAR ]] && ok "--only rejects unknown ids, takes a list, and never fakes a silent result" \
+                      || bad "--only handling wrong" "${onlyf//|/$'\n        '}"
+
 # chatter/bulk cover the two Bash detectors and both cover preamble and
 # session-length, which every long fixture trips.
 covered+=(bash-chatter bash-bulk preamble session-length)
