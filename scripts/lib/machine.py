@@ -56,8 +56,14 @@ KNOWN_TOOLS = {
 
 
 def _read_json(path):
+    # utf-8-sig reads a byte-order mark and a plain UTF-8 file identically, so
+    # this is strictly more permissive than utf-8. Windows editors and some
+    # PowerShell redirections write BOMs by default and Claude Code runs on
+    # Windows, so a BOM'd config is reachable without doing anything unusual --
+    # and a BOM is invisible in most editors, which makes the resulting "does
+    # not parse" the least actionable message the tool could give.
     try:
-        with open(path, "r", errors="replace") as fh:
+        with open(path, "r", errors="replace", encoding="utf-8-sig") as fh:
             return json.load(fh)
     except Exception:
         return None

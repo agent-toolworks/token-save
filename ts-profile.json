@@ -101,11 +101,12 @@
   }
  },
  "setup": {
+  "config_readable": false,
   "custom_base_url": false,
   "hook_events": [],
   "known_tools_installed": [],
   "mcp_servers_called": 0,
-  "mcp_servers_configured": 0,
+  "mcp_servers_configured": null,
   "memory_files": 1,
   "memory_tokens": 0,
   "skills_description_tokens": 0,

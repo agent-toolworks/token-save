@@ -145,6 +145,22 @@ class Gate:
 
 
 @dataclass
+class Unevaluated:
+    """A detector that could not run, as distinct from one that ran and found
+    nothing to report.
+
+    Those are different facts and the output could not tell them apart: an
+    unreadable config suppressed `mcp-schema` through the same path it would
+    use to say "nothing here", so a machine with four MCP servers and an
+    unreadable file looked exactly like a machine with none. That is not only
+    a display problem -- it feeds a wrong datum into cross-machine
+    calibration, where 0 and unknown must never be averaged together.
+    """
+    id: str
+    reason: str
+
+
+@dataclass
 class Finding:
     id: str
     title: str
@@ -613,7 +629,10 @@ def d_mcp_schema(fleet, mach):
     """
     mcp = mach["mcp"]
     if not mcp.get("readable"):
-        return None
+        return Unevaluated(
+            "mcp-schema",
+            "MCP configuration could not be read, so this was not checked — "
+            "`ts doctor --mcp` names the file")
     n_global = len(mcp["global"])
     n_proj = sum(len(v) for v in mcp["projects"].values())
     configured = set(mcp["global"])
@@ -1114,21 +1133,40 @@ CATALOGUE = {
 }
 
 
-def run(fleet, mach) -> list:
-    """Every detector that fires, ranked by severity then estimated saving."""
-    found = []
+def evaluate(fleet, mach):
+    """(findings, unevaluated).
+
+    A detector that could not run is reported as such rather than dropped. It
+    used to vanish into the same silence as one that ran and found nothing --
+    including when it raised, where the warning went to stderr and the report
+    itself said nothing at all.
+    """
+    found, blocked = [], []
     for det in DETECTORS:
         try:
             f = det(fleet, mach)
         except Exception as exc:  # a broken detector must not kill the report
             sys.stderr.write("warning: detector %s failed: %s\n"
                              % (getattr(det, "__name__", "?"), exc))
+            blocked.append(Unevaluated(getattr(det, "__name__", "?"),
+                                       "detector raised %s: %s"
+                                       % (type(exc).__name__, exc)))
             continue
-        if f:
+        if isinstance(f, Unevaluated):
+            blocked.append(f)
+        elif f:
             # Detectors set a severity for readability while being written;
             # the report only ever shows the one derived from the number, so
             # the two can never drift apart in front of a reader.
             f.severity = severity_for(f.saving_pct)
             found.append(f)
     found.sort(key=lambda f: f.rank)
-    return found
+    return found, blocked
+
+
+def run(fleet, mach) -> list:
+    """Every detector that fires, ranked by severity then estimated saving.
+
+    Findings only; see evaluate() for the ones that could not be checked.
+    """
+    return evaluate(fleet, mach)[0]

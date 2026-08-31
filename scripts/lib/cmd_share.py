@@ -115,8 +115,17 @@ def build(fleet: Fleet, mach: dict) -> dict:
         },
         "setup": {
             # Counts and booleans only. Never the server names, never the paths.
-            "mcp_servers_configured": (len(mach["mcp"]["global"])
-                                       + sum(len(v) for v in mach["mcp"]["projects"].values())),
+            # null, never 0, when the source could not be read. A machine
+            # with four MCP servers and an unreadable config reported 0 and
+            # was indistinguishable from one that genuinely has none -- so it
+            # did not merely lose a datum, it contributed a WRONG one to
+            # cross-machine calibration. null cannot be silently averaged;
+            # config_readable says why it is null.
+            "config_readable": bool(mach["mcp"].get("readable")),
+            "mcp_servers_configured": (
+                (len(mach["mcp"]["global"])
+                 + sum(len(v) for v in mach["mcp"]["projects"].values()))
+                if mach["mcp"].get("readable") else None),
             # Counts only. Server NAMES stay out: they can identify an employer
             # or an internal service.
             "mcp_servers_called": len(fleet.mcp_servers_called()),

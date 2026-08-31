@@ -606,6 +606,104 @@ CRLF
 [[ $crlf == CLEAR ]] && ok "fixes preserve CRLF and LF alike, and never mix the two" \
                      || bad "line endings not preserved" "${crlf//|/$'\n        '}"
 
+# A byte-order mark is invisible in most editors, Windows writes one by
+# default, and json.load under plain utf-8 rejects it -- so a valid config was
+# reported as "does not parse", which describes no observable defect. Configs
+# are read as utf-8-sig, which handles BOM and no-BOM identically, and `fixes`
+# PRESERVES the mark rather than stripping it: rewriting a file's first bytes
+# unasked is the same class of change as reindenting it.
+bom=$(python3 - "$TMP" "$ROOT" <<'BOM'
+import io, json, os, subprocess, sys
+sys.path.insert(0, os.path.join(sys.argv[2], "scripts", "lib"))
+
+tmp, root = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+bad = []
+
+cfg = os.path.join(tmp, "bomcfg")
+os.makedirs(cfg, exist_ok=True)
+io.open(os.path.join(cfg, ".claude.json"), "w", encoding="utf-8-sig").write(
+    json.dumps({"mcpServers": {"alpha": {}, "beta": {}}}))
+env = dict(os.environ)
+env["CLAUDE_CONFIG_DIR"] = cfg
+r = subprocess.run(
+    [sys.executable, "-c",
+     "import sys, json; sys.path.insert(0, %r); import machine;"
+     "m = machine.mcp_servers();"
+     "print(json.dumps([m['readable'], sorted(m['global'])]))"
+     % os.path.join(root, "scripts", "lib")],
+    env=env, capture_output=True, text=True)
+try:
+    readable, servers = json.loads(r.stdout)
+except Exception:
+    readable, servers = None, None
+if not readable or servers != ["alpha", "beta"]:
+    bad.append("a BOM'd .claude.json read as readable=%r servers=%r"
+               % (readable, servers))
+
+# `fixes` must keep the mark AND the line endings, and still round-trip.
+sp = os.path.join(cfg, "settings.json")
+io.open(sp, "w", encoding="utf-8-sig", newline="").write(
+    '{\r\n  "model": "opus"\r\n}\r\n')
+before = open(sp, "rb").read()
+subprocess.run([ts, "fixes", "apply", "tool-search", "--yes"], env=env,
+               capture_output=True)
+after = open(sp, "rb").read()
+if not after.startswith(b"\xef\xbb\xbf"):
+    bad.append("apply stripped the byte-order mark")
+if after.count(b"\n") - after.count(b"\r\n"):
+    bad.append("apply introduced lone-LF lines into a BOM'd CRLF file")
+subprocess.run([ts, "fixes", "revert", "tool-search"], env=env,
+               capture_output=True)
+if open(sp, "rb").read() != before:
+    bad.append("apply+revert on a BOM'd file is not byte-identical")
+
+# Unreadable must be distinguishable from empty, which is the half that
+# matters regardless of BOMs: 0 and unknown were rendering identically into
+# data being collected to compare machines.
+broke = os.path.join(tmp, "brokecfg")
+os.makedirs(broke, exist_ok=True)
+io.open(os.path.join(broke, ".claude.json"), "w").write("{ not json")
+env2 = dict(os.environ)
+env2["CLAUDE_CONFIG_DIR"] = broke
+adv = subprocess.run([ts, "advise", "--json"], env=env2, capture_output=True,
+                     text=True)
+try:
+    d = json.loads(adv.stdout)
+except Exception:
+    d = {}
+if "mcp-schema" in (d.get("silent") or []):
+    bad.append("mcp-schema is listed as silent though it could not be checked")
+if "mcp-schema" not in {u["id"] for u in (d.get("unevaluated") or [])}:
+    bad.append("mcp-schema is not reported as unevaluated: %r"
+               % d.get("unevaluated"))
+
+sh = subprocess.run([ts, "share", "--show"], env=env2, capture_output=True,
+                    text=True)
+try:
+    prof = json.loads(sh.stdout)
+except Exception:
+    prof = {}
+found = {}
+for sec in prof.values():
+    if isinstance(sec, dict):
+        found.update({k: v for k, v in sec.items()
+                      if k in ("mcp_servers_configured", "config_readable")})
+if found.get("mcp_servers_configured") == 0:
+    bad.append("share reports mcp_servers_configured: 0 for an UNREADABLE "
+               "config -- indistinguishable from a machine that has none")
+if found.get("mcp_servers_configured") is not None:
+    bad.append("share should report null when the config is unreadable, got %r"
+               % found.get("mcp_servers_configured"))
+if found.get("config_readable") is not False:
+    bad.append("share does not flag the config as unreadable: %r" % found)
+print("|".join(bad) if bad else "CLEAR")
+BOM
+)
+[[ $bom == CLEAR ]] && ok "a BOM is read and preserved, and unreadable is not reported as zero" \
+                    || bad "BOM / unreadable-config handling wrong" \
+                           "${bom//|/$'\n        '}"
+
 # A corrupt settings.json must be refused, not overwritten. This is the one
 # failure mode that would destroy user configuration.
 printf '{ this is not json' > "$CLAUDE_CONFIG_DIR/settings.json"

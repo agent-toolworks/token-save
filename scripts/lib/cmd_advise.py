@@ -18,7 +18,7 @@ import report as R  # noqa: E402
 from transcripts import Fleet, tokenizer_name  # noqa: E402
 
 
-def _render(findings, fleet, show_all: bool) -> None:
+def _render(findings, fleet, show_all: bool, blocked=()) -> None:
     if not findings:
         print("\n  " + R.green("nothing fired.")
               + " Every detector read your numbers and stayed quiet.")
@@ -73,8 +73,15 @@ def _render(findings, fleet, show_all: bool) -> None:
                   + "ts fixes show %s" % f.fix)
 
     print("\n" + R.rule())
+    # Printed whether or not --all was asked for: "could not check" is news,
+    # and burying it behind a flag is how an unreadable config looked exactly
+    # like a clean bill of health.
+    if blocked:
+        print("\n  " + R.bold("could not be evaluated"))
+        for u in blocked:
+            print("    " + R.yellow("??") + "   %-18s %s" % (u.id, u.reason))
     if show_all:
-        fired = {f.id for f in findings}
+        fired = {f.id for f in findings} | {u.id for u in blocked}
         rest = [(k, v) for k, v in advise.CATALOGUE.items() if k not in fired]
         if rest:
             print("\n  " + R.bold("did not fire on this machine"))
@@ -100,7 +107,7 @@ def main(argv=None) -> int:
         return 1
     mach = machine.collect()
 
-    findings = advise.run(fleet, mach)
+    findings, blocked = advise.evaluate(fleet, mach)
     if args.only:
         findings = [f for f in findings if f.id == args.only]
 
@@ -139,8 +146,13 @@ def main(argv=None) -> int:
                 },
                 "evidence": f.evidence, "actions": f.actions, "fix": f.fix,
             } for f in findings],
+            # `silent` means checked and quiet. A detector that could not run
+            # is listed apart, with why -- being unable to check is not the
+            # same as having checked and found nothing.
             "silent": [k for k in advise.CATALOGUE
-                       if k not in {f.id for f in findings}],
+                       if k not in {f.id for f in findings}
+                       and k not in {u.id for u in blocked}],
+            "unevaluated": [{"id": u.id, "reason": u.reason} for u in blocked],
         }, indent=1))
         return 0
 
@@ -154,7 +166,7 @@ def main(argv=None) -> int:
                     " + %d subagent transcripts" % subn if subn else "",
                     "{:,}".format(fleet.turns()),
                     fleet.amplification(), tokenizer_name())))
-    _render(findings, fleet, args.all)
+    _render(findings, fleet, args.all, blocked)
     print()
     return 0
 

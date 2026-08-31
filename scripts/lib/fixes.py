@@ -73,6 +73,18 @@ def _read(path: str) -> str:
         return ""
 
 
+def _split_bom(text: str):
+    """Separate a leading byte-order mark from the rest.
+
+    A BOM is content to preserve, not noise to strip. Windows editors and some
+    PowerShell redirections write one by default, and json.loads chokes on it,
+    so it is held aside for parsing and put back on write. Stripping it would
+    silently rewrite the file's first bytes -- the same class of unasked-for
+    change as reindenting it, which is what this module exists not to do.
+    """
+    return ("\ufeff", text[1:]) if text.startswith("\ufeff") else ("", text)
+
+
 def _newline(text: str) -> str:
     """The line ending this file already uses.
 
@@ -293,25 +305,31 @@ def _settings_path() -> str:
 
 
 def _load_settings(path: str):
+    """(data, ok, error). `error` names what went wrong, for the message."""
     if not os.path.isfile(path):
-        return {}, True
-    raw = _read(path)
-    if not raw.strip():
-        return {}, True
+        return {}, True, ""
+    _bom, body = _split_bom(_read(path))
+    if not body.strip():
+        return {}, True, ""
     try:
-        return json.loads(raw), True
-    except Exception:
-        return None, False
+        return json.loads(body), True, ""
+    except Exception as exc:
+        return None, False, str(exc)
 
 
 def toolsearch_show():
     path = _settings_path()
-    data, ok = _load_settings(path)
+    data, ok, err = _load_settings(path)
     if not ok:
+        # Say what is wrong, not merely that something is. "fix it by hand
+        # first" described no observable defect to anyone whose file was
+        # rejected for an invisible reason.
         return {"id": "tool-search", "target": path, "applied": False,
                 "exists": True, "diff": "",
                 "why": "settings.json is not valid JSON; refusing to touch it.",
-                "blocked": "settings.json does not parse — fix it by hand first"}
+                "blocked": "settings.json does not parse (%s) — a byte-order "
+                           "mark is handled, so this is a real syntax error"
+                           % err}
     cur = (data.get("env") or {}).get("ENABLE_TOOL_SEARCH")
     applied = str(cur).lower() in ("true", "1", "on")
     return {
@@ -328,10 +346,11 @@ def toolsearch_show():
 
 def toolsearch_apply():
     path = _settings_path()
-    raw = _read(path) if os.path.isfile(path) else ""
-    data, ok = _load_settings(path)
+    bom, raw = _split_bom(_read(path) if os.path.isfile(path) else "")
+    data, ok, err = _load_settings(path)
     if not ok:
-        return False, "settings.json does not parse — refusing to overwrite it"
+        return False, ("settings.json does not parse (%s) — refusing to "
+                       "overwrite it" % err)
     env = data.get("env")
     if env is not None and not isinstance(env, dict):
         return False, '"env" is not an object — refusing to touch it'
@@ -366,17 +385,17 @@ def toolsearch_apply():
                 new = raw[:inner[2]] + '"true"' + raw[inner[3]:]
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    _write(path, new)
+    _write(path, bom + new)
     return True, "set env.ENABLE_TOOL_SEARCH=true in %s%s" % (
         path, " (backup: %s)" % backup if backup else "")
 
 
 def toolsearch_revert():
     path = _settings_path()
-    raw = _read(path) if os.path.isfile(path) else ""
-    data, ok = _load_settings(path)
+    bom, raw = _split_bom(_read(path) if os.path.isfile(path) else "")
+    data, ok, err = _load_settings(path)
     if not ok:
-        return False, "settings.json does not parse"
+        return False, "settings.json does not parse (%s)" % err
     env = data.get("env")
     if not isinstance(env, dict) or "ENABLE_TOOL_SEARCH" not in env:
         return False, "not applied"
@@ -386,7 +405,7 @@ def toolsearch_revert():
     else:
         new = _remove_member(raw, _find(raw, top, "env")[2], "ENABLE_TOOL_SEARCH")
     _backup(path)
-    _write(path, new)
+    _write(path, bom + new)
     return True, "removed env.ENABLE_TOOL_SEARCH from %s" % path
 
 FIXES = {
