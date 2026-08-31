@@ -1058,7 +1058,7 @@ NOCLAIM
 # The existing check names this invariant and cannot reach it: its fixture has
 # no saving_pct=None finding, and its comparison raises TypeError on one. So
 # this constructs the arrangement -- and fails if it does not get it.
-sevord=$(python3 - "$ROOT" <<'SEVORD'
+sevord=$(python3 - "$ROOT" "$TMP" <<'SEVORD'
 import os, sys
 sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "lib"))
 import advise, machine
@@ -1096,6 +1096,80 @@ noclaim_l = [f for f in fs if not f.claims_saving]
 if fs != claimed + noclaim_l:
     bad.append("the two blocks are interleaved: %s"
                % [(f.id, f.claims_saving) for f in fs])
+
+# #32: the above asserts the Python objects, BEFORE serialisation, so a change
+# to the ordering or the field in cmd_advise.py would not be caught by the
+# check that exists to protect it. Assert the emitted payload too, on a real
+# corpus rather than these objects.
+import json as _json, subprocess as _sp
+_ts = os.path.join(sys.argv[1], "scripts", "ts")
+_env = dict(os.environ)
+# A corpus built to contain the arrangement, rather than a fixture that
+# happens to. mcp-schema reads machine config and does not fire under verify's
+# sanitised environment, so the bulk fixture emits no no-claim finding at all
+# and a payload assertion against it passes whatever the serialiser does.
+_root = os.path.join(sys.argv[2], "claimsplit")
+_proj = os.path.join(_root, "-x-repo")
+os.makedirs(os.path.join(_proj, "s-main", "subagents"), exist_ok=True)
+
+def _write(path, turns, ctx, out):
+    with open(path, "w") as fh:
+        for _i in range(turns):
+            fh.write(_json.dumps({"type": "assistant", "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "x " * 60}],
+                "usage": {"input_tokens": 0, "cache_creation_input_tokens": 0,
+                          "cache_read_input_tokens": ctx,
+                          "output_tokens": out}}}) + "\n")
+
+for _i in range(6):
+    _write(os.path.join(_proj, "s%d.jsonl" % _i), 40, 50_000, 3_000)
+# Deep enough to classify as subagents, and heavy enough that subagent-cost
+# clears its 5% gate and claims no saving.
+for _i in range(8):
+    _write(os.path.join(_proj, "s-main", "subagents", "a%d.jsonl" % _i),
+           40, 40_000, 3_000)
+_write(os.path.join(_proj, "s-main.jsonl"), 40, 50_000, 3_000)
+
+_r = _sp.run([_ts, "advise", "--json", "--root", _root],
+             env=_env, capture_output=True, text=True)
+try:
+    _d = _json.loads(_r.stdout)
+except Exception:
+    _d = None
+if _d is None:
+    bad.append("advise --json did not parse, so the payload is unasserted")
+else:
+    _f = _d["findings"]
+    if not _f:
+        bad.append("advise --json produced no findings; the payload boundary "
+                   "is unasserted")
+    if not any(_one["saving_pct"] is None for _one in _f):
+        bad.append("the payload carries no finding that claims no saving, so "
+                   "the block boundary in --json is unasserted: %s"
+                   % [_one["id"] for _one in _f])
+    for _one in _f:
+        if "claims_saving" not in _one:
+            bad.append("%s carries no claims_saving; a consumer must infer the "
+                       "block boundary from a null" % _one["id"])
+            break
+        if _one["claims_saving"] != (_one["saving_pct"] is not None):
+            bad.append("%s: claims_saving=%r disagrees with saving_pct=%r"
+                       % (_one["id"], _one["claims_saving"], _one["saving_pct"]))
+    _flags = [_one.get("claims_saving") for _one in _f]
+    if sorted(_flags, reverse=True) != _flags:
+        bad.append("the emitted findings interleave the two blocks: %s" % _flags)
+    # Orthogonal to the block split, and the payload must keep them so:
+    # session-length is union_excluded AND claims a saving.
+    for _one in _f:
+        if _one["id"] in _d["union_excluded"] and not _one["claims_saving"]:
+            continue
+        if _one["id"] in _d["union_excluded"] and _one["claims_saving"]:
+            break
+    else:
+        if _d["union_excluded"]:
+            bad.append("no union_excluded finding claims a saving here, so the "
+                       "orthogonality of the two categories is unasserted")
 if not claimed:
     bad.append("fixture built no finding that claims a saving, so the "
                "cross-block arrangement under test does not occur here")

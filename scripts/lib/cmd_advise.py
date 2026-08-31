@@ -252,6 +252,18 @@ def main(argv=None) -> int:
             "findings": [{
                 "id": f.id, "title": f.title, "severity": f.severity,
                 "confidence": f.confidence,
+                # Which block the finding is rendered in. Derivable from
+                # `saving_pct is null`, but the array is flat and carries both
+                # blocks in order, so a consumer rendering it as given gets a
+                # non-monotone severity column with nothing saying why. The
+                # human reader is told in a printed sentence; this is the same
+                # sentence for the machine.
+                #
+                # Per-finding rather than a top-level id list beside
+                # `union_excluded`: those two are orthogonal, and adjacency
+                # would imply otherwise. `session-length` is union_excluded
+                # AND claims a saving, so it sits in the first block.
+                "claims_saving": f.claims_saving,
                 "saving_pct": (None if f.saving_pct is None
                                else round(f.saving_pct, 2)),
                 "locates_pct": (None if f.locates_pct is None
