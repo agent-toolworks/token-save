@@ -51,13 +51,22 @@ def _memory(mach) -> str:
     else:
         out.append("  " + R.dim("no CLAUDE.md / memory files found"))
     out.append("")
+    # The on-disk size of every SKILL.md used to be printed here, 27x the
+    # number it was explaining and 7.6x the whole preamble it sat under, with
+    # a one-line caveat asking the reader to discount it. Needing that caveat
+    # was the tell. What loads is the frontmatter description, so that is what
+    # is reported; the caveat is gone because it is no longer needed.
+    dup = sk.get("duplicates", 0)
     out.append(R.kv("installed skills", "{:,}".format(sk["count"]),
-                    "~{:,} tokens of SKILL.md on disk".format(sk["total"])))
+                    "~{:,} tokens of descriptions, loaded every session".format(
+                        sk.get("desc_total", 0))))
+    if dup:
+        out.append("  " + R.dim("%d further SKILL.md file(s) are duplicate "
+                                "copies of these, nested in the plugin cache, "
+                                "and are not counted" % dup))
     if sk["files"]:
         for p, t in sk["files"][:5]:
             out.append("      %7s  %s" % ("{:,}".format(t), _short(p)))
-        out.append("  " + R.dim("only the frontmatter description of each skill "
-                                "loads up front, not the whole file"))
     return "\n".join(out)
 
 

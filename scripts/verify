@@ -375,6 +375,65 @@ CFGJ
                      || bad "CLAUDE_JSON does not respect the config dir" \
                             "${cfgj//|/$'\n        '}"
 
+# doctor reported the on-disk size of every SKILL.md -- 27x what loads, and
+# 7.6x the preamble it sat under -- with a caveat asking the reader to discount
+# it. Only the frontmatter description loads. The same recursive walk also
+# counted nested plugin copies of one skill as several skills, which inflated
+# `skills_installed` in `ts share`, a field used to argue that machines differ.
+skl=$(python3 - "$ROOT" "$TMP" <<'SKL'
+import os, subprocess, sys, json
+
+root, tmp = sys.argv[1], sys.argv[2]
+home = os.path.join(tmp, "skillhome")
+
+
+def skill(relpath, desc, body_kb):
+    p = os.path.join(home, relpath, "SKILL.md")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as fh:
+        fh.write("---\nname: %s\ndescription: %s\n---\n\n%s\n"
+                 % (os.path.basename(relpath), desc, "body text " * (body_kb * 100)))
+
+
+# `alpha` twice: the canonical shallow copy and a nested plugin copy.
+skill("skills/alpha", "trigger phrase for alpha", 40)
+skill("plugins/p1/skills/alpha", "trigger phrase for alpha", 40)
+skill("plugins/p1/plugins/p2/skills/beta", "trigger phrase for beta", 40)
+
+code = ("import sys, json; sys.path.insert(0, %r); import machine; "
+        "print(json.dumps(machine.skills_footprint()))"
+        % os.path.join(root, "scripts", "lib"))
+env = dict(os.environ)
+env["CLAUDE_CONFIG_DIR"] = home
+r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                   text=True, env=env)
+if r.returncode != 0:
+    raise SystemExit("probe failed: " + (r.stderr or "")[:200])
+sk = json.loads(r.stdout)
+
+bad = []
+if sk["count"] != 2:
+    bad.append("counted %d skills, expected 2 distinct (alpha, beta) from 3 "
+               "SKILL.md files" % sk["count"])
+if sk.get("duplicates") != 1:
+    bad.append("reported %r duplicate copies, expected 1"
+               % sk.get("duplicates"))
+paths = [p for p, _t in sk["files"]]
+if any(os.sep + "plugins" + os.sep in p and "alpha" in p for p in paths):
+    bad.append("kept the nested copy of alpha instead of the shallowest path")
+# The bodies are ~40KB each; the descriptions are a few words. If the body were
+# being counted this would be thousands of tokens, which is the original bug.
+if sk["desc_total"] > 60:
+    bad.append("desc_total is %d tokens -- the body is being counted, not just "
+               "the frontmatter description" % sk["desc_total"])
+if sk["total"] <= sk["desc_total"] * 10:
+    bad.append("on-disk total (%d) is not far above desc_total (%d); the "
+               "fixture is not exercising the gap" % (sk["total"], sk["desc_total"]))
+print("|".join(bad) if bad else "CLEAR")
+SKL
+)
+[[ $skl == CLEAR ]] && ok "skills: deduplicated by name, and sized by description not by file" \
+                    || bad "skills footprint wrong" "${skl//|/$'\n        '}"
 
 # A corrupt settings.json must be refused, not overwritten. This is the one
 # failure mode that would destroy user configuration.

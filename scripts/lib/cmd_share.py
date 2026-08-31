@@ -120,8 +120,15 @@ def build(fleet: Fleet, mach: dict) -> dict:
             # Counts only. Server NAMES stay out: they can identify an employer
             # or an internal service.
             "mcp_servers_called": len(fleet.mcp_servers_called()),
+            # Distinct skills, not SKILL.md files: nested plugin copies were
+            # inflating this by 25% here and 145% on the reporting machine.
+            # It is one of the fields used to argue that machines differ, so
+            # counting packaging instead of surface compared the wrong thing.
             "skills_installed": mach["skills"]["count"],
-            "skills_tokens_on_disk": mach["skills"]["total"],
+            "skills_duplicate_files": mach["skills"].get("duplicates", 0),
+            # What actually loads. The on-disk total this replaces was 27x
+            # larger and described nothing anyone pays for.
+            "skills_description_tokens": mach["skills"].get("desc_total", 0),
             "memory_tokens": mach["memory"]["total"],
             "memory_files": len(mach["memory"]["files"]),
             "custom_base_url": bool(mach["env"].get("ANTHROPIC_BASE_URL")),

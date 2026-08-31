@@ -31,17 +31,17 @@ CLAUDE_HOME = os.path.expanduser(_CONFIG_DIR_ENV or "~/.claude")
 # invoking user's actual home whatever CLAUDE_CONFIG_DIR said. Two costs: a
 # machine that genuinely uses CLAUDE_CONFIG_DIR had its MCP configuration
 # described from the wrong file, and no sandboxed test could reach this path
-# at all -- which is why `verify` exported a throwaway CLAUDE_CONFIG_DIR and
+# at all -- which is why `verify` exports a throwaway CLAUDE_CONFIG_DIR and
 # mcp-schema still fired on the fixture fleets, reading the real config.
 #
 # It lives INSIDE the config directory. The env-vars reference says of
 # CLAUDE_CONFIG_DIR that "all settings, session history, and plugins are
-# stored under this path"; the documented use is running multiple accounts
-# side by side, and .claude.json holds the sign-in session, which that use
-# requires to move with it; `projects/` is documented relocating inside it the
-# same way. Note the DEFAULT is not inside: ~/.claude.json is a SIBLING of
-# ~/.claude/, so the unset case is spelled out rather than derived, and
-# today's behaviour is unchanged.
+# stored under this path", the documented use is running multiple accounts
+# side by side, and .claude.json holds the sign-in session -- which that use
+# requires to move with it. `projects/` is documented relocating inside it the
+# same way. Note the DEFAULT is not inside: ~/.claude.json is a sibling of
+# ~/.claude/, so the unset case is spelled out separately rather than derived,
+# and today's behaviour is unchanged.
 CLAUDE_JSON = (os.path.join(CLAUDE_HOME, ".claude.json") if _CONFIG_DIR_ENV
                else os.path.expanduser("~/.claude.json"))
 
@@ -183,21 +183,42 @@ def skills_footprint() -> dict:
     """
     roots = [os.path.join(CLAUDE_HOME, "skills"),
              os.path.join(CLAUDE_HOME, "plugins")]
-    total, desc_total, found = 0, 0, []
+    # A recursive **/SKILL.md walk finds the same skill more than once: a
+    # plugin cache can hold <plugin-a>/skills/<name>/SKILL.md and, nested
+    # under another plugin, <plugin-b>/plugins/<plugin-a>/skills/<name>/
+    # SKILL.md. 40 files here are 30 distinct skills; the reporter's 155 are
+    # 63. Counting the copies inflates the skill count, the on-disk total and
+    # `skills_installed` in `ts share` -- and that last one is a field people
+    # are asked to send in, used to argue that machines differ. Inflated by
+    # packaging on one machine and not another, it compares the wrong thing.
+    #
+    # Deduplicated by skill name, shallowest path winning, so the canonical
+    # copy is the one counted rather than whichever os.walk reached first.
+    by_name = {}
+    dupes = 0
     for r in roots:
         if not os.path.isdir(r):
             continue
         for dirpath, _d, names in os.walk(r):
-            if "SKILL.md" in names:
-                p = os.path.join(dirpath, "SKILL.md")
-                t = _size_tokens(p)
-                d = _description_tokens(p)
-                total += t
-                desc_total += d
-                found.append((p, d))
+            if "SKILL.md" not in names:
+                continue
+            p = os.path.join(dirpath, "SKILL.md")
+            name = os.path.basename(dirpath)
+            depth = p.count(os.sep)
+            if name in by_name:
+                dupes += 1
+                if depth >= by_name[name][0]:
+                    continue
+            by_name[name] = (depth, p)
+    total, desc_total, found = 0, 0, []
+    for _depth, p in by_name.values():
+        d = _description_tokens(p)
+        total += _size_tokens(p)
+        desc_total += d
+        found.append((p, d))
     found.sort(key=lambda x: -x[1])
     return {"count": len(found), "total": total, "desc_total": desc_total,
-            "files": found}
+            "duplicates": dupes, "files": found}
 
 
 def mcp_servers() -> dict:
