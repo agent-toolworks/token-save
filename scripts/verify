@@ -1513,6 +1513,76 @@ ONLY
 [[ $onlyf == CLEAR ]] && ok "--only rejects unknown ids, takes a list, and never fakes a silent result" \
                       || bad "--only handling wrong" "${onlyf//|/$'\n        '}"
 
+# A shared profile has to say what it is. `schema` stayed 1 across three
+# mutually incompatible shapes -- `mcp_servers` split in two,
+# `skills_tokens_on_disk` was REPLACED by a different quantity (484,371 against
+# 8,681 on one machine), `mcp_servers_configured` became nullable -- and
+# `amplification` under schema 1 is not one quantity either, having moved
+# 387 -> 134 on an unchanged workload as the accounting bugs were fixed.
+# Profiles are being collected to calibrate thresholds; one that cannot be
+# identified is worse than one that does not exist.
+#
+# So the field set is PINNED here. Changing it fails this check, and the only
+# way to pass is to bump SCHEMA and update the list below deliberately -- which
+# is the point. `tool_version` is asserted to be a real version, since it was
+# the literal string "ts" in every profile ever generated.
+prof=$(python3 - "$TMP" "$ROOT" <<'PROF'
+import json, os, re, subprocess, sys
+
+tmp, root = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+r = subprocess.run([ts, "share", "--root", os.path.join(tmp, "chatter"),
+                    "--show"], capture_output=True, text=True)
+bad = []
+if r.returncode != 0:
+    print("share --show exited %d: %s" % (r.returncode, r.stderr.strip()[:120]))
+    raise SystemExit(0)
+p = json.loads(r.stdout)
+
+EXPECTED_SCHEMA = 2
+EXPECTED = {
+    None: ["amplification", "bash", "billed", "by_tool", "content",
+           "content_total", "cost_units", "findings", "generated_by",
+           "platform", "scale", "schema", "session_shape", "setup", "silent",
+           "tool_version"],
+    "scale": ["sessions", "sessions_substantive", "subagent_transcripts",
+              "turns"],
+    "setup": ["config_readable", "custom_base_url", "hook_events",
+              "known_tools_installed", "mcp_servers_called",
+              "mcp_servers_configured", "memory_files", "memory_tokens",
+              "skills_description_tokens", "skills_duplicate_files",
+              "skills_installed", "tool_search"],
+    "platform": ["os", "python", "tokenizer"],
+    "billed": ["cache_read", "cache_write", "input", "output"],
+    "session_shape": ["peak_context", "preamble", "turns"],
+}
+
+if p.get("schema") != EXPECTED_SCHEMA:
+    bad.append("schema is %r, expected %d -- if the shape changed, the bump "
+               "and this list must change together"
+               % (p.get("schema"), EXPECTED_SCHEMA))
+for section, want in EXPECTED.items():
+    got = sorted(p if section is None else (p.get(section) or {}))
+    if got != sorted(want):
+        where = section or "(top level)"
+        bad.append("%s fields changed: +%s -%s -- bump SCHEMA and update the "
+                   "pinned list" % (where, sorted(set(got) - set(want)),
+                                    sorted(set(want) - set(got))))
+
+# tool_version must be the version, not the program name.
+ver = p.get("tool_version")
+manifest = json.load(open(os.path.join(root, ".claude-plugin", "plugin.json")))
+if ver != manifest["version"]:
+    bad.append("tool_version is %r, expected the real version %r"
+               % (ver, manifest["version"]))
+if not re.match(r"^\d+\.\d+\.\d+$", str(ver or "")):
+    bad.append("tool_version %r does not look like a version" % ver)
+print("|".join(bad) if bad else "CLEAR")
+PROF
+)
+[[ $prof == CLEAR ]] && ok "share profile: schema pinned to its field set, tool_version is a real version" \
+                     || bad "share profile schema drifted" "${prof//|/$'\n        '}"
+
 # chatter/bulk cover the two Bash detectors and both cover preamble and
 # session-length, which every long fixture trips.
 covered+=(bash-chatter bash-bulk preamble session-length)

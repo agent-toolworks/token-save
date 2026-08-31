@@ -167,6 +167,23 @@ redaction is a whitelist — a field that is not named cannot appear — and
 `scripts/verify` plants a canary through paths, commands, results and MCP tool
 names, then fails if any of it survives.
 
+**What a profile can be compared with.** Every profile carries `schema` and
+`tool_version`, and both matter. `schema` is bumped whenever a field name, a
+field type, or the *meaning* of a value changes; `tool_version` identifies the
+release even when it is not.
+
+Profiles from **before v0.11.0 are not comparable with later ones**, and not
+only because fields moved. `amplification` measured 387 on one machine under
+v0.6.0 and 134 on the same unchanged workload under v0.10.0 — the difference is
+nested subagent transcripts going uncounted, usage being counted per transcript
+line rather than per message, and a single-constant token estimator, all since
+fixed. Those profiles also carry inflated billed totals and report the on-disk
+size of every `SKILL.md` where later ones report only the descriptions that
+actually load, a figure 56x smaller. They declare `"schema": 1` and, worse,
+`"tool_version": "ts"` — the literal string, in every profile generated before
+v0.11.0 — so they cannot identify themselves at all. Treat one as a historical
+artifact rather than a data point.
+
 A typical profile is about 3KB.
 
 If you run this and the advice looks wrong for your machine, that is the most

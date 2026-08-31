@@ -32,7 +32,39 @@ import machine as M  # noqa: E402
 import report as R  # noqa: E402
 from transcripts import Fleet, quantile, tokenizer_name  # noqa: E402
 
-SCHEMA = 1
+# Bump on ANY change to a field name, a field type, or the MEANING of a value.
+# Schema 1 covered three mutually incompatible shapes across v0.6.0-v0.11.0:
+# `mcp_servers` split into called/configured, `skills_tokens_on_disk` was
+# replaced by `skills_description_tokens` -- a different quantity, 484,371
+# against 8,681 on one machine -- and `mcp_servers_configured` became nullable.
+# Worse, `amplification` under schema 1 is not one quantity: the nested-
+# transcript, per-message-usage and per-class-estimator fixes moved it 387 ->
+# 134 on an unchanged workload. A collection that cannot recover which of
+# those a profile is cannot calibrate anything, which is what profiles are
+# being gathered for.
+def _tool_version() -> str:
+    """The version that produced this profile.
+
+    Preferred from the environment, which `ts` exports, so the answer matches
+    the CLI the user actually ran. Falls back to the plugin manifest for a
+    direct `python3 scripts/lib/cmd_share.py` invocation, and says so plainly
+    rather than guessing when neither is available -- an unknown version is a
+    usable fact, a wrong one is not.
+    """
+    env = os.environ.get("TS_VERSION")
+    if env:
+        return env
+    manifest = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        ".claude-plugin", "plugin.json")
+    try:
+        with open(manifest, "r", errors="replace") as fh:
+            return str(json.load(fh).get("version") or "unknown")
+    except Exception:
+        return "unknown"
+
+
+SCHEMA = 2
 
 
 def _dist(values: list) -> dict:
@@ -81,7 +113,11 @@ def build(fleet: Fleet, mach: dict) -> dict:
 
     return {
         "schema": SCHEMA,
-        "tool_version": "ts",
+        # The literal string "ts" was stamped here in every profile ever
+        # generated -- the wrong token out of `ts version`'s "ts 0.11.0".
+        # With a real version, a profile identifies itself even across a
+        # schema bump that someone forgets.
+        "tool_version": _tool_version(),
         "generated_by": "ts share",
         "platform": {
             "os": platform.system(),
