@@ -255,6 +255,65 @@ def stored_output(fleet) -> int:
             + bu.get("tool call inputs", 0))
 
 
+# session-length is excluded from the union deliberately. It overlaps every
+# other finding -- shortening a session reduces the re-reads of everything in
+# it -- so encoding that honestly puts every finding in one group and collapses
+# the union to max(session-length, ...), which on a typical machine IS
+# session-length. That is a valid lower bound and a useless number: it reports
+# the largest finding and calls it the total. It is reported next to the union
+# as a multiplier on what remains instead.
+UNION_EXCLUDED = ("session-length",)
+
+
+def union_lower_bound(findings) -> tuple:
+    """A conservative floor on what the findings are worth together.
+
+    The report refuses to let a reader add the percentages, and until now said
+    nothing about what they DO come to -- so a reader with eight findings and a
+    warning had no number at all, and the naive sum (45.8% on the reporting
+    machine) is the one thing it is told not to compute.
+
+    Findings that overlap or contain one another cannot be added, so each
+    connected group of them contributes its LARGEST member and nothing more.
+    Findings with no declared relationship, and pairs declared disjoint, are
+    additive. Both directions are conservative: a real union is at least this
+    and possibly more, never less, so the number can be labelled a floor
+    without further qualification.
+
+    Returns (total, groups) where groups is [[ids...]] as counted, largest
+    contribution first.
+    """
+    pool = [f for f in findings if f.id not in UNION_EXCLUDED]
+    by_id = {f.id: f for f in pool}
+    # Union-find over the relations that forbid addition. DISJOINT is not an
+    # edge: those may be added, which is the whole point of declaring it.
+    parent = {f.id: f.id for f in pool}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for (a, b), (kind, _subject) in RELATIONS.items():
+        if kind != DISJOINT and a in by_id and b in by_id:
+            union(a, b)
+
+    groups = {}
+    for fid in by_id:
+        groups.setdefault(find(fid), []).append(fid)
+    counted = sorted(
+        ([sorted(ids), max(by_id[i].saving_pct for i in ids)]
+         for ids in groups.values()),
+        key=lambda g: -g[1])
+    return sum(g[1] for g in counted), [g[0] for g in counted]
+
+
 def severity_for(saving_pct: float) -> str:
     """Severity IS the estimated impact.
 

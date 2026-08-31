@@ -42,6 +42,26 @@ def _render(findings, fleet, show_all: bool, blocked=(), only=None) -> None:
           + R.dim("   largest single item: ~%.0f%% of spend" % top))
     print("  " + R.dim("findings overlap — do not add these percentages together"))
 
+    # Saying only what NOT to compute left the reader with eight numbers, a
+    # warning, and no total. The floor counts each overlapping group once, so
+    # it is what the findings are worth together AT LEAST.
+    union, groups = advise.union_lower_bound(findings)
+    if union:
+        merged = [g for g in groups if len(g) > 1]
+        note = ("; %s counted once" % ", ".join("+".join(g) for g in merged)
+                if merged else "")
+        print("  " + R.dim("taken together they are worth ")
+              + R.bold("at least %.1f%%" % union)
+              + R.dim(" of spend%s" % note))
+    excluded = [f for f in findings if f.id in advise.UNION_EXCLUDED]
+    for f in excluded:
+        # Left out of the sum rather than folded in: it overlaps every other
+        # finding, so grouping it honestly would collapse the union to this one
+        # number and report the largest finding as the total.
+        print("  " + R.dim("`%s` (%.1f%%) overlaps all of the above — a "
+                           "multiplier on what remains, not an addition"
+                           % (f.id, f.saving_pct)))
+
     for i, f in enumerate(findings, 1):
         print("\n" + R.rule())
         head = "  %s  %s  %s" % (R.severity(f.severity), R.bold(f.title),
@@ -156,6 +176,7 @@ def main(argv=None) -> int:
         blocked = [u for u in blocked if u.id in only]
         silent_ids = [k for k in silent_ids if k in only]
 
+    _union_total, _union_groups = advise.union_lower_bound(findings)
     if args.json:
         print(json.dumps({
             "tokenizer": tokenizer_name(),
@@ -163,6 +184,14 @@ def main(argv=None) -> int:
             "subagent_transcripts": len(fleet.subagents()),
             "turns": fleet.turns(),
             "amplification": round(fleet.amplification(), 1),
+            # A floor, not an estimate: each overlapping group counted once,
+            # so the real union is at least this. `excluded` names what was
+            # left out and why, so a consumer is not silently handed a total
+            # that quietly omits the largest lever.
+            "union_lower_bound_pct": round(_union_total, 2),
+            "union_groups": _union_groups,
+            "union_excluded": [f.id for f in findings
+                               if f.id in advise.UNION_EXCLUDED],
             "findings": [{
                 "id": f.id, "title": f.title, "severity": f.severity,
                 "confidence": f.confidence,

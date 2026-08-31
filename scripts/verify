@@ -901,6 +901,65 @@ REL
 [[ $rel == CLEAR ]] && ok "no two findings give contradictory instructions about each other" \
                     || bad "findings contradict each other on how to combine" "${rel//|/$'\n        '}"
 
+# #27 (3): the report said what NOT to add and never what the findings come to,
+# leaving a reader with eight numbers, a warning and no total. The floor counts
+# each overlapping group once, so it can be stated without qualification -- the
+# real union is at least this. The properties that make that claim safe are
+# what is checked: never above the naive sum, never below the largest single
+# finding, and monotone in neither direction by accident.
+uni=$(python3 - "$ROOT" <<'UNI'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "lib"))
+import advise
+
+class F:
+    def __init__(self, fid, pct):
+        self.id, self.saving_pct = fid, pct
+
+bad = []
+
+# preamble and attachments OVERLAP, so the pair contributes the larger only.
+# output-verbosity and reasoning-cost are DISJOINT, so both count.
+fs = [F("preamble", 5.0), F("attachments", 3.0),
+      F("output-verbosity", 4.0), F("reasoning-cost", 2.0),
+      F("images", 1.0)]
+total, groups = advise.union_lower_bound(fs)
+want = 5.0 + 4.0 + 2.0 + 1.0          # attachments folded into preamble
+if abs(total - want) > 1e-9:
+    bad.append("union is %.2f, want %.2f (overlap counted once, disjoint added)"
+               % (total, want))
+if not any(sorted(g) == ["attachments", "preamble"] for g in groups):
+    bad.append("preamble/attachments were not grouped: %s" % groups)
+if any("output-verbosity" in g and "reasoning-cost" in g for g in groups):
+    bad.append("a DISJOINT pair was grouped; declaring it disjoint is what "
+               "says they may be added")
+
+# session-length overlaps everything; folding it in collapses the union to
+# itself and reports the largest finding as the total.
+fs2 = fs + [F("session-length", 20.0)]
+total2, _g2 = advise.union_lower_bound(fs2)
+if abs(total2 - total) > 1e-9:
+    bad.append("session-length changed the union (%.2f -> %.2f); it must be "
+               "excluded and reported separately" % (total, total2))
+
+# The two bounds that make "at least" honest.
+naive = sum(f.saving_pct for f in fs)
+largest = max(f.saving_pct for f in fs)
+if total > naive + 1e-9:
+    bad.append("union %.2f exceeds the naive sum %.2f" % (total, naive))
+if total < largest - 1e-9:
+    bad.append("union %.2f is below the largest single finding %.2f"
+               % (total, largest))
+
+# An empty report must not produce a total.
+if advise.union_lower_bound([])[0] != 0:
+    bad.append("union is non-zero with no findings")
+print("|".join(bad) if bad else "CLEAR")
+UNI
+)
+[[ $uni == CLEAR ]] && ok "the union is a floor: overlaps counted once, disjoint added, session-length out" \
+                    || bad "union arithmetic is wrong" "${uni//|/$'\n        '}"
+
 # A byte-order mark is invisible in most editors, Windows writes one by
 # default, and json.load under plain utf-8 rejects it -- so a valid config was
 # reported as "does not parse", which describes no observable defect. Configs
