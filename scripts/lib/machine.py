@@ -23,8 +23,27 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from transcripts import BUCKET_ASSISTANT, toks  # noqa: E402
 
-CLAUDE_HOME = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude"))
-CLAUDE_JSON = os.path.expanduser("~/.claude.json")
+_CONFIG_DIR_ENV = os.environ.get("CLAUDE_CONFIG_DIR")
+CLAUDE_HOME = os.path.expanduser(_CONFIG_DIR_ENV or "~/.claude")
+
+# .claude.json was the one path pinned to the real home while every other
+# derived from CLAUDE_HOME, so global MCP configuration was read from the
+# invoking user's actual home whatever CLAUDE_CONFIG_DIR said. Two costs: a
+# machine that genuinely uses CLAUDE_CONFIG_DIR had its MCP configuration
+# described from the wrong file, and no sandboxed test could reach this path
+# at all -- which is why `verify` exported a throwaway CLAUDE_CONFIG_DIR and
+# mcp-schema still fired on the fixture fleets, reading the real config.
+#
+# It lives INSIDE the config directory. The env-vars reference says of
+# CLAUDE_CONFIG_DIR that "all settings, session history, and plugins are
+# stored under this path"; the documented use is running multiple accounts
+# side by side, and .claude.json holds the sign-in session, which that use
+# requires to move with it; `projects/` is documented relocating inside it the
+# same way. Note the DEFAULT is not inside: ~/.claude.json is a SIBLING of
+# ~/.claude/, so the unset case is spelled out rather than derived, and
+# today's behaviour is unchanged.
+CLAUDE_JSON = (os.path.join(CLAUDE_HOME, ".claude.json") if _CONFIG_DIR_ENV
+               else os.path.expanduser("~/.claude.json"))
 
 # Third-party tools this project knows how to reason about. Presence alone is
 # not a recommendation — advise.py decides from the measurements whether any of

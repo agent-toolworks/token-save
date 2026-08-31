@@ -50,6 +50,22 @@ bounded() {
 }
 
 TMP=$(mktemp -d)
+
+# Every check runs against a throwaway CLAUDE_CONFIG_DIR, not only the fixes
+# section where this used to be set. Two reasons it belongs at the top:
+#
+#   1. A verify run must never touch the operator's real configuration.
+#   2. Detector output must not depend on the machine running the tests. It
+#      did: the routing checks in section 2 ran before this line, so
+#      mcp-schema fired there off whatever MCP servers the developer happened
+#      to have configured, and a contributor with a different setup saw
+#      different fixture results.
+#
+# Until CLAUDE_JSON derived from CLAUDE_CONFIG_DIR (it was pinned to the real
+# home) even this would not have isolated the global-MCP path, which is the
+# hole that made it unreachable from any sandboxed test.
+export CLAUDE_CONFIG_DIR="$TMP/home"
+mkdir -p "$CLAUDE_CONFIG_DIR"
 cleanup() { [[ $KEEP == 1 ]] || rm -rf "$TMP"; }
 trap cleanup EXIT
 
@@ -232,10 +248,6 @@ grep -qi traceback "$TMP/empty.err" \
   && bad "empty transcript root produced a traceback" \
   || ok "empty transcript root reports cleanly"
 
-# Fixes run against a throwaway CLAUDE_CONFIG_DIR so a verify run can never
-# touch the operator's real configuration.
-export CLAUDE_CONFIG_DIR="$TMP/home"
-mkdir -p "$CLAUDE_CONFIG_DIR"
 for fid in terse-output tool-search; do
   "$TS" fixes apply "$fid" --yes >/dev/null 2>&1
   a=$("$TS" fixes show "$fid" 2>/dev/null | grep -c "applied" || true)
@@ -301,6 +313,68 @@ for variant in trailing no-trailing; do
            diff "$RCFG/js.orig" "$RCFG/settings.json")"
   fi
 done
+
+# CLAUDE_JSON was the one path pinned to the real home while every other
+# derived from CLAUDE_HOME, so global MCP config was read from the invoking
+# user's actual home whatever CLAUDE_CONFIG_DIR said -- and no sandboxed test
+# could reach that branch at all. Both directions are pinned: a canary planted
+# in a sandboxed .claude.json must be READ (the path is reachable now), and the
+# unset case must still resolve to ~/.claude.json, which is a SIBLING of
+# ~/.claude rather than inside it, so it cannot simply be derived.
+cfgj=$(python3 - "$ROOT" "$TMP" <<'CFGJ'
+import json, os, subprocess, sys
+
+root, tmp = sys.argv[1], sys.argv[2]
+lib = os.path.join(root, "scripts", "lib")
+code = ("import sys, json; sys.path.insert(0, %r); import machine; "
+        "print(json.dumps({'home': machine.CLAUDE_HOME, "
+        "'json': machine.CLAUDE_JSON, "
+        "'servers': sorted((machine.mcp_servers() or {}).get('global') or []), "
+        "'readable': machine.mcp_servers().get('readable')}))" % lib)
+
+
+def probe(config_dir):
+    env = dict(os.environ)
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       text=True, env=env)
+    if r.returncode != 0:
+        raise SystemExit("probe failed: " + (r.stderr or "")[:200])
+    return json.loads(r.stdout)
+
+
+bad = []
+sand = os.path.join(tmp, "cfgjson")
+os.makedirs(sand, exist_ok=True)
+with open(os.path.join(sand, ".claude.json"), "w") as fh:
+    json.dump({"mcpServers": {"zqcanary-sandboxed": {}}}, fh)
+
+got = probe(sand)
+if got["json"] != os.path.join(sand, ".claude.json"):
+    bad.append("CLAUDE_JSON is %r, expected it inside CLAUDE_CONFIG_DIR"
+               % got["json"])
+if got["servers"] != ["zqcanary-sandboxed"]:
+    bad.append("sandboxed .claude.json was not read: servers=%r -- the global "
+               "MCP path is still unreachable from a test" % got["servers"])
+
+plain = probe(None)
+if plain["json"] != os.path.expanduser("~/.claude.json"):
+    bad.append("with CLAUDE_CONFIG_DIR unset, CLAUDE_JSON is %r, expected "
+               "~/.claude.json" % plain["json"])
+if plain["home"] != os.path.expanduser("~/.claude"):
+    bad.append("with CLAUDE_CONFIG_DIR unset, CLAUDE_HOME moved to %r"
+               % plain["home"])
+if "zqcanary-sandboxed" in plain["servers"]:
+    bad.append("the sandbox canary leaked into the unset case")
+print("|".join(bad) if bad else "CLEAR")
+CFGJ
+)
+[[ $cfgj == CLEAR ]] && ok "CLAUDE_JSON follows CLAUDE_CONFIG_DIR, and a sandboxed canary is read" \
+                     || bad "CLAUDE_JSON does not respect the config dir" \
+                            "${cfgj//|/$'\n        '}"
+
 
 # A corrupt settings.json must be refused, not overwritten. This is the one
 # failure mode that would destroy user configuration.
