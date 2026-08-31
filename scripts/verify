@@ -312,6 +312,64 @@ after=$(cat "$CLAUDE_CONFIG_DIR/settings.json")
   && ok "unparseable settings.json is refused, not overwritten" \
   || bad "unparseable settings.json was overwritten"
 
+# The estimator's divisor is per content class. 3.6 was accurate in AGGREGATE
+# while describing no actual class: measured against tiktoken over 14.3M chars
+# of real transcript, the classes run 2.48 (dense JSON) to 4.72 (prose). That
+# put up to 31% error on a single bucket while the total looked fine, and it
+# landed on the denominator of amplification. Pinned here: the no-class default
+# is UNCHANGED (toks() has callers outside parse()), the per-class divisors are
+# the ones that were measured, and no bucket silently loses its constant.
+est=$(python3 - "$ROOT" <<'EST'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "lib"))
+import transcripts as T
+
+bad = []
+if T._ENC is not None:
+    print("SKIP tiktoken is installed, so toks() is exact and has no divisor")
+    raise SystemExit(0)
+
+# No class = the old single constant, exactly. This is the compatibility the
+# change rests on: fixtures and any caller outside parse() must not shift.
+if T.toks("x" * 3600) != 1000:
+    bad.append("no-class toks() no longer divides by 3.6 (got %d, want 1000)"
+               % T.toks("x" * 3600))
+
+for cls, want in ((T.BUCKET_ASSISTANT, 4.06), (T.BUCKET_USER, 4.49),
+                  (T.BUCKET_TOOL_IN, 3.50), (T.BUCKET_TOOL_TEXT, 3.53),
+                  (T.CPT_BASH, 3.69), (T.BUCKET_ATTACH, 3.68),
+                  (T.BUCKET_SYSTEM, 2.48)):
+    n = 10000
+    got = T.toks("x" * n, cls)
+    if got != int(n / want):
+        bad.append("%s divides by %.3f, expected %.2f"
+                   % (cls, n / float(got or 1), want))
+
+# A new bucket added without a constant would silently inherit 3.6 and its
+# error would be invisible. Both lists are explicit so that shows up here.
+have = set(T._CPT)
+want_have = {T.BUCKET_ASSISTANT, T.BUCKET_USER, T.BUCKET_TOOL_IN,
+             T.BUCKET_TOOL_TEXT, T.CPT_BASH, T.BUCKET_ATTACH, T.BUCKET_SYSTEM}
+if have != want_have:
+    bad.append("calibrated classes changed: +%s -%s"
+               % (sorted(have - want_have), sorted(want_have - have)))
+# thinking is deliberately uncalibrated: Claude Code stores the field empty.
+if T.BUCKET_THINKING in T._CPT:
+    bad.append("thinking has a divisor, but the field is always empty")
+
+# Bash and non-Bash tool results must stay separable even though the report
+# pools them -- that gap is the largest single contributor to the spread.
+if T._CPT[T.CPT_BASH] == T._CPT[T.BUCKET_TOOL_TEXT]:
+    bad.append("Bash and non-Bash tool results collapsed to one divisor")
+print("|".join(bad) if bad else "CLEAR")
+EST
+)
+case "$est" in
+  CLEAR)  ok "estimator: per-class divisors, and no-class behaviour unchanged" ;;
+  SKIP*)  skip "estimator per-class divisors" "${est#SKIP }" ;;
+  *)      bad "estimator calibration wrong" "${est//|/$'\n        '}" ;;
+esac
+
 # ---------------------------------------------------------------------------
 head_ "4. COMMAND CLASSIFIER  (the BASH DETAIL leaderboard)"
 # ---------------------------------------------------------------------------

@@ -12,12 +12,43 @@ The whole point of this tool is the RATIO between them, so the honest thing is
 to keep the exact side exact and label the estimated side as estimated. Every
 report prints which tokenizer produced the CONTENT column.
 
-Estimator: ``len(text) / 3.6``. Calibrated against ``tiktoken`` cl100k_base over
-a random sample of real transcript content — aggregate error +1.3%, which is
-well inside the precision anyone acts on. When ``tiktoken`` is importable it is
-used instead and the report says so. The divisor is deliberately a single
-constant rather than a clever blend: blends scored WORSE here (-2.2% at best,
--19% at worst) because they overfit whitespace, and a constant is auditable.
+Estimator: ``len(text) / divisor``, with the divisor chosen per content class.
+When ``tiktoken`` is importable it is used instead and the report says so.
+
+A single constant of 3.6 was accurate in AGGREGATE — +1.0% against tiktoken
+here — while describing no actual class of content. Measured over 14.3M
+characters of real transcript, the classes run from 2.48 chars/token (system
+records, dense JSON) to 4.72 (user prose): a spread of 91%. So the aggregate
+error was a function of workload MIX, not of the estimator, and a machine
+dominated by one class inherited that class's error in full and was never
+told. It landed on the denominator of amplification, which is the number the
+README leads with.
+
+Per class, end to end against tiktoken on this machine's own transcripts:
+
+    bucket                    old       new
+    tool call inputs        -3.1%     -0.3%
+    tool results (text)     +3.8%     +2.4%
+    attachments             +1.9%     -0.8%
+    assistant text         +14.1%     +1.1%
+    system records         -31.4%     -0.3%
+    user prompts           +28.9%     +4.6%
+    CONTENT TOTAL           +1.0%     +0.8%
+
+The aggregate barely moves. The worst single bucket improves 6.8x, and that is
+the whole point: the total was never what was wrong. Blends of several signals
+are still not used — they scored worse than a constant because they overfit
+whitespace — and a table of per-class constants stays as auditable as one.
+
+The divisors average two independent measurements where two exist and use the
+single available one otherwise; they are a proxy, since Anthropic's tokenizer
+is neither cl100k_base nor o200k_base.
+
+Do NOT expect the ``assistant text`` and ``assistant thinking`` buckets to sum
+to billed ``output``. They cannot: Claude Code stores the thinking field empty,
+and stored assistant content accounts for roughly 42% of billed output here.
+Reading one as a check on the other will suggest the estimator is badly broken
+when it is not. `reasoning-cost` in advise.py measures that gap deliberately.
 
 Images are counted at Anthropic's documented (w*h)/750, capped at 1600, read
 from the actual image header rather than assumed — a base64 payload is ~4x its
@@ -40,6 +71,35 @@ from dataclasses import dataclass, field
 # --------------------------------------------------------------------------
 
 _CHARS_PER_TOKEN = 3.6
+
+# Per-class divisors. 3.6 is accurate in AGGREGATE because a mix of content
+# averages out to it, not because it describes any actual class: measured
+# against tiktoken over 14.3M characters of real transcript here, the classes
+# run from 2.48 (system records, dense JSON) to 4.72 (user prose) -- a spread
+# of 91%, against an aggregate error of +1.2%.
+#
+# That makes the error a function of WORKLOAD MIX rather than of the estimator,
+# and it lands on the denominator of amplification, which is the number the
+# README leads with. A machine dominated by one class inherits that class's
+# error wholesale and is never told.
+#
+# The numbers below average two independent measurements (this machine's, over
+# cl100k_base and o200k_base, and the reporter's, over o200k_base) for the four
+# classes both measured, and use the single available measurement for the three
+# only one did. They are a proxy: Anthropic's tokenizer is neither of these.
+#
+# What this buys, measured against local ground truth rather than assumed:
+# aggregate error is unchanged (+1.2% -> +1.1%) and WORST-CLASS error falls
+# from 31.2% to 5.5%. The aggregate was never the problem.
+#
+# Note that the reporter's four constants alone score +0.9% aggregate but leave
+# the worst class at -31.2%, because system records -- which neither their
+# table nor the README considered -- fall through to 3.6. Covering every class
+# matters more than the precision of any one constant.
+CPT_BASH = "bash result"        # a toks() key only; the bucket stays TOOL_TEXT
+
+_CPT = {}                       # populated below, once the buckets are named
+
 _ENC = None
 _ENC_NAME = "estimate(len/3.6)"
 
@@ -57,8 +117,14 @@ def tokenizer_name() -> str:
     return _ENC_NAME
 
 
-def toks(text) -> int:
-    """Token count for a string. Estimated unless tiktoken is installed."""
+def toks(text, cls: str = None) -> int:
+    """Token count for a string. Estimated unless tiktoken is installed.
+
+    ``cls`` is the content class -- a bucket name, or CPT_BASH -- and selects a
+    per-class divisor. It defaults to None, which uses the single global
+    constant and reproduces the previous behaviour exactly, because toks() has
+    callers outside parse() that have no class to give it.
+    """
     if not text:
         return 0
     if not isinstance(text, str):
@@ -68,7 +134,7 @@ def toks(text) -> int:
             return len(_ENC.encode(text, disallowed_special=()))
         except Exception:
             pass
-    return int(len(text) / _CHARS_PER_TOKEN)
+    return int(len(text) / _CPT.get(cls, _CHARS_PER_TOKEN))
 
 
 # --------------------------------------------------------------------------
@@ -195,6 +261,21 @@ ATTACH_FAMILY = {
     "command_permissions": FAM_BOOKKEEPING,
     "diagnostics": FAM_BOOKKEEPING,
 }
+
+
+# Filled in here rather than above because it keys off the bucket names.
+_CPT.update({
+    BUCKET_ASSISTANT: 4.06,
+    BUCKET_USER: 4.49,
+    BUCKET_TOOL_IN: 3.50,
+    BUCKET_TOOL_TEXT: 3.53,     # tool results that are NOT Bash
+    CPT_BASH: 3.69,
+    BUCKET_ATTACH: 3.68,
+    BUCKET_SYSTEM: 2.48,
+    # BUCKET_THINKING is absent deliberately: Claude Code stores the field
+    # empty, so there is nothing to size and nothing to calibrate against.
+    # See `reasoning-cost`, which measures that cost from the billed side.
+})
 
 
 def attach_family(t: str) -> str:
@@ -438,7 +519,7 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
             if kind == "attachment":
                 if not usage_only:
                     att = rec.get("attachment")
-                    n = toks(json.dumps(att, default=str))
+                    n = toks(json.dumps(att, default=str), BUCKET_ATTACH)
                     _bump(s.buckets, BUCKET_ATTACH, n)
                     kind_ = (att.get("type") if isinstance(att, dict) else None)
                     kind_ = str(kind_) if kind_ else "unlabelled"
@@ -448,7 +529,8 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
             if kind == "system":
                 if not usage_only:
                     _bump(s.buckets, BUCKET_SYSTEM,
-                          toks(json.dumps(rec.get("message") or rec, default=str)))
+                          toks(json.dumps(rec.get("message") or rec, default=str),
+                               BUCKET_SYSTEM))
                 continue
             if kind not in ("assistant", "user"):
                 continue
@@ -502,15 +584,17 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
                             continue
                         t = b.get("type")
                         if t == "text":
-                            _bump(s.buckets, BUCKET_ASSISTANT, toks(b.get("text")))
+                            _bump(s.buckets, BUCKET_ASSISTANT,
+                                  toks(b.get("text"), BUCKET_ASSISTANT))
                         elif t == "thinking":
-                            _bump(s.buckets, BUCKET_THINKING, toks(b.get("thinking")))
+                            _bump(s.buckets, BUCKET_THINKING,
+                                  toks(b.get("thinking"), BUCKET_THINKING))
                         elif t == "tool_use":
                             name = b.get("name") or "?"
                             inp = b.get("input") or {}
                             id2name[b.get("id")] = name
                             id2input[b.get("id")] = inp
-                            n = toks(json.dumps(inp, default=str))
+                            n = toks(json.dumps(inp, default=str), BUCKET_TOOL_IN)
                             _bump(s.buckets, BUCKET_TOOL_IN, n)
                             _bump(s.tool_in, name, n)
                             _bump(s.tool_calls, name, 1)
@@ -522,7 +606,7 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
             if usage_only:
                 continue
             if isinstance(content, str):
-                _bump(s.buckets, BUCKET_USER, toks(content))
+                _bump(s.buckets, BUCKET_USER, toks(content, BUCKET_USER))
                 continue
             if not isinstance(content, list):
                 continue
@@ -531,7 +615,8 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
                     continue
                 t = b.get("type")
                 if t == "text":
-                    _bump(s.buckets, BUCKET_USER, toks(b.get("text")))
+                    _bump(s.buckets, BUCKET_USER,
+                          toks(b.get("text"), BUCKET_USER))
                 elif t == "image":
                     n = image_tokens(((b.get("source") or {}).get("data")) or "")
                     _bump(s.buckets, BUCKET_USER, n)
@@ -542,19 +627,24 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
                     cc = b.get("content")
                     text_n = 0
                     img_n = 0
+                    # Bash output and other tool results are one bucket in the
+                    # report but two content classes in the estimator: on the
+                    # reporting machine they sit 9% apart, the single largest
+                    # contributor to the spread.
+                    rcls = CPT_BASH if name == "Bash" else BUCKET_TOOL_TEXT
                     if isinstance(cc, str):
-                        text_n = toks(cc)
+                        text_n = toks(cc, rcls)
                     elif isinstance(cc, list):
                         for blk in cc:
                             if not isinstance(blk, dict):
                                 continue
                             if blk.get("type") == "text":
-                                text_n += toks(blk.get("text"))
+                                text_n += toks(blk.get("text"), rcls)
                             elif blk.get("type") == "image":
                                 img_n += image_tokens(((blk.get("source") or {}).get("data")) or "")
                                 s.images += 1
                     elif cc is not None:
-                        text_n = toks(json.dumps(cc, default=str))
+                        text_n = toks(json.dumps(cc, default=str), rcls)
                     if text_n:
                         _bump(s.buckets, BUCKET_TOOL_TEXT, text_n)
                     if img_n:

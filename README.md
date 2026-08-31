@@ -41,12 +41,15 @@ None of that is knowable without measuring. So this measures first.
 scripts/bootstrap --check    # what is present; installs nothing
 scripts/ts audit             # where the tokens went
 scripts/ts advise            # what to do about it, ranked
-scripts/verify               # 12 checks against fixtures with known answers
+scripts/verify               # checks against fixtures with known answers
 ```
 
 `python3` (3.9+) is the only hard requirement. `tiktoken` is optional — without
-it, content sizes use `len/3.6`, which lands within **1.5%** of the real
-tokenizer in aggregate. Every report names which counter produced its numbers.
+it, content sizes are estimated from character counts using a divisor per
+content class, which lands within about **1%** of the real tokenizer in
+aggregate and within **5%** on any single class. The aggregate figure is
+mix-dependent, so treat it as ~2% rather than a guarantee. Every report names
+which counter produced its numbers.
 
 Nothing is sent anywhere. There is no network code in this repository.
 
