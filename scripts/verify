@@ -542,6 +542,70 @@ done
               || bad "commands still die on a hostile transcript" \
                      "${ran# }$(printf '\n        '; head -3 "$TMP/hostile.${ran%%(*}.err" 2>/dev/null)"
 
+# Line endings. Python's text mode translates on read and writes "\n" back, so
+# both fixes converted a CRLF file wholesale -- and `terse-output`, because it
+# APPENDS rather than rewrites, left the original lines CRLF and only its new
+# block LF: one file with two conventions, which is harder to spot than a clean
+# conversion. On Windows that turned the one-line diff this editing exists to
+# produce back into a whole-file diff.
+crlf=$(python3 - "$TMP" "$ROOT" <<'CRLF'
+import io, os, subprocess, sys
+
+tmp, root = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+bad = []
+
+
+def counts(path):
+    b = open(path, "rb").read()
+    c = b.count(b"\r\n")
+    return c, b.count(b"\n") - c          # (crlf, lone lf)
+
+
+def run(cfg, *args):
+    env = dict(os.environ)
+    env["CLAUDE_CONFIG_DIR"] = cfg
+    subprocess.run([ts, "fixes"] + list(args), env=env, capture_output=True)
+
+
+for label, nl in (("crlf", "\r\n"), ("lf", "\n")):
+    for fid, name, body in (
+        ("tool-search", "settings.json",
+         '{%(n)s  "model": "opus"%(n)s}%(n)s'),
+        ("terse-output", "CLAUDE.md",
+         '# Notes%(n)s%(n)ssome text%(n)s'),
+    ):
+        cfg = os.path.join(tmp, "eol-%s-%s" % (label, fid))
+        os.makedirs(cfg, exist_ok=True)
+        path = os.path.join(cfg, name)
+        io.open(path, "w", newline="").write(body % {"n": nl})
+        before = open(path, "rb").read()
+        b_crlf, b_lf = counts(path)
+
+        run(cfg, "apply", fid, "--yes")
+        a_crlf, a_lf = counts(path)
+        if label == "crlf":
+            if a_lf:
+                bad.append("%s/%s: apply left %d lone-LF line(s) in a CRLF "
+                           "file -- mixed endings in one file" % (fid, label, a_lf))
+            if a_crlf <= b_crlf:
+                bad.append("%s/%s: apply did not add CRLF lines (%d -> %d); "
+                           "the file was converted" % (fid, label, b_crlf, a_crlf))
+        else:
+            if a_crlf:
+                bad.append("%s/%s: apply introduced %d CRLF line(s) into an "
+                           "LF file" % (fid, label, a_crlf))
+
+        run(cfg, "revert", fid)
+        if open(path, "rb").read() != before:
+            bad.append("%s/%s: apply+revert is not byte-identical" % (fid, label))
+
+print("|".join(bad) if bad else "CLEAR")
+CRLF
+)
+[[ $crlf == CLEAR ]] && ok "fixes preserve CRLF and LF alike, and never mix the two" \
+                     || bad "line endings not preserved" "${crlf//|/$'\n        '}"
+
 # A corrupt settings.json must be refused, not overwritten. This is the one
 # failure mode that would destroy user configuration.
 printf '{ this is not json' > "$CLAUDE_CONFIG_DIR/settings.json"

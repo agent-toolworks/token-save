@@ -62,11 +62,33 @@ def _latest_backup(path: str):
 
 
 def _read(path: str) -> str:
+    # newline="" disables universal-newline translation, so a CRLF file comes
+    # back with its CRLFs. Without it Python converts on read and writes "\n"
+    # back out, and a one-key change becomes a whole-file diff on Windows --
+    # which is the exact failure the in-place editing was written to remove.
     try:
-        with open(path, "r", errors="replace") as fh:
+        with open(path, "r", errors="replace", newline="") as fh:
             return fh.read()
     except OSError:
         return ""
+
+
+def _newline(text: str) -> str:
+    """The line ending this file already uses.
+
+    Ties and files with no line ending at all go to "\n": there is no
+    convention to preserve, so the platform-neutral one is used rather than
+    guessing from the operating system, which would make the same file take
+    different fixes on different machines.
+    """
+    crlf = text.count("\r\n")
+    return "\r\n" if crlf > (text.count("\n") - crlf) else "\n"
+
+
+def _write(path: str, text: str) -> None:
+    """Write bytes through unchanged. newline="" is the whole point."""
+    with open(path, "w", newline="") as fh:
+        fh.write(text)
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +132,14 @@ def terse_apply():
     # revert can put it back exactly.
     if cur and not cur.endswith("\n"):
         block = "\n" + block[:-1]
-    with open(path, "a") as fh:
+    # Because this fix APPENDS rather than rewrites, getting this wrong left
+    # the original lines CRLF and only the new block LF -- one file with two
+    # conventions, which is harder to notice than a clean conversion and is
+    # what several linters and diff tools complain about.
+    nl = _newline(cur)
+    if nl != "\n":
+        block = block.replace("\n", nl)
+    with open(path, "a", newline="") as fh:
         fh.write(block)
     return True, "appended to %s%s" % (
         path, " (backup: %s)" % backup if backup else "")
@@ -124,21 +153,22 @@ def terse_revert():
     if begin not in cur:
         return False, "not applied"
     trailing = cur.endswith("\n")
+    nl = _newline(cur)
     i = cur.index(begin)
     j = cur.index(end) + len(end)
     # Take back exactly what apply() wrote: the block's own terminator and the
-    # blank-line separator in front of it. Anything else in the file -- runs of
-    # blank lines the author put there -- is not ours to normalise.
-    if j < len(cur) and cur[j] == "\n":
-        j += 1
-    if i and cur[i - 1] == "\n":
-        i -= 1
+    # blank-line separator in front of it -- one line ending each, whatever
+    # this file's line ending is. Anything else in the file -- runs of blank
+    # lines the author put there -- is not ours to normalise.
+    if cur[j:j + len(nl)] == nl:
+        j += len(nl)
+    if i >= len(nl) and cur[i - len(nl):i] == nl:
+        i -= len(nl)
     new = cur[:i] + cur[j:]
     if not trailing and not cur[j:]:
-        new = new.rstrip("\n")     # apply() also had to terminate the last line
+        new = new.rstrip("\r\n")   # apply() also had to terminate the last line
     _backup(path)
-    with open(path, "w") as fh:
-        fh.write(new)
+    _write(path, new)
     return True, "removed the block from %s" % path
 
 # ---------------------------------------------------------------------------
@@ -221,8 +251,13 @@ def _indent_unit(s: str) -> str:
     return "  "
 
 
-def _insert_member(s: str, obj_start: int, key: str, value_src: str) -> str:
-    """Splice `"key": value_src` in as the last member of an object."""
+def _insert_member(s: str, obj_start: int, key: str, value_src: str,
+                   nl: str = "\n") -> str:
+    """Splice `"key": value_src` in as the last member of an object.
+
+    `nl` is the file's own line ending, so the inserted line matches the lines
+    around it rather than introducing a second convention.
+    """
     obj_start = _skip_ws(s, obj_start)
     _obj, obj_end = _DECODER.raw_decode(s, obj_start)
     close = s.rindex("}", obj_start, obj_end)
@@ -232,7 +267,7 @@ def _insert_member(s: str, obj_start: int, key: str, value_src: str) -> str:
         return s[:obj_start + 1] + entry + s[close:]
     indent = _line_indent(s, members[0][1])
     end = members[-1][3]
-    sep = ", " if indent is None else ",\n" + indent
+    sep = ", " if indent is None else "," + nl + indent
     return s[:end] + sep + entry + s[end:]
 
 
@@ -305,10 +340,12 @@ def toolsearch_apply():
 
     backup = _backup(path) if os.path.isfile(path) else None
     unit = _indent_unit(raw) if raw.strip() else "  "
+    nl = _newline(raw)
 
     if not raw.strip():
-        new = '{\n%s"env": {\n%s%s"ENABLE_TOOL_SEARCH": "true"\n%s}\n}\n' % (
-            unit, unit, unit, unit)
+        new = ('{%(nl)s%(u)s"env": {%(nl)s%(u)s%(u)s'
+               '"ENABLE_TOOL_SEARCH": "true"%(nl)s%(u)s}%(nl)s}%(nl)s'
+               % {"nl": nl, "u": unit})
     else:
         top = _skip_ws(raw, 0)
         rec = _find(raw, top, "env")
@@ -317,19 +354,19 @@ def toolsearch_apply():
             if indent is None:
                 value_src = '{"ENABLE_TOOL_SEARCH": "true"}'
             else:
-                value_src = '{\n%s%s"ENABLE_TOOL_SEARCH": "true"\n%s}' % (
-                    indent, unit, indent)
-            new = _insert_member(raw, top, "env", value_src)
+                value_src = '{%s%s%s"ENABLE_TOOL_SEARCH": "true"%s%s}' % (
+                    nl, indent, unit, nl, indent)
+            new = _insert_member(raw, top, "env", value_src, nl)
         else:
             inner = _find(raw, rec[2], "ENABLE_TOOL_SEARCH")
             if inner is None:
-                new = _insert_member(raw, rec[2], "ENABLE_TOOL_SEARCH", '"true"')
+                new = _insert_member(raw, rec[2], "ENABLE_TOOL_SEARCH",
+                                     '"true"', nl)
             else:
                 new = raw[:inner[2]] + '"true"' + raw[inner[3]:]
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as fh:
-        fh.write(new)
+    _write(path, new)
     return True, "set env.ENABLE_TOOL_SEARCH=true in %s%s" % (
         path, " (backup: %s)" % backup if backup else "")
 
@@ -349,8 +386,7 @@ def toolsearch_revert():
     else:
         new = _remove_member(raw, _find(raw, top, "env")[2], "ENABLE_TOOL_SEARCH")
     _backup(path)
-    with open(path, "w") as fh:
-        fh.write(new)
+    _write(path, new)
     return True, "removed env.ENABLE_TOOL_SEARCH from %s" % path
 
 FIXES = {
