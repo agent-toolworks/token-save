@@ -156,6 +156,57 @@ BUCKET_USER = "user prompts"
 BUCKET_ATTACH = "attachments"
 BUCKET_SYSTEM = "system records"
 
+# The attachments bucket is four unrelated cost sources with four unrelated
+# fixes, and reporting it as one number meant the advice beside it could only
+# be right for whichever source happened to dominate. These families are what
+# the advice keys off.
+#
+# The type strings are Claude Code's, not ours, and they move between versions
+# -- deferred_tools_delta and agent_listing_delta both look recent. So this map
+# is explicitly OPEN: anything unrecognised lands in its own family and is
+# reported under its real name rather than being folded into a neighbour. A
+# closed vocabulary meeting a moving target is a bug this repo has already had.
+FAM_LISTING = "harness listings"
+FAM_HOOK = "hook output"
+FAM_FILE = "file content"
+FAM_BOOKKEEPING = "harness bookkeeping"
+FAM_OTHER = "unrecognised"
+
+ATTACH_FAMILY = {
+    "skill_listing": FAM_LISTING,
+    "deferred_tools_delta": FAM_LISTING,
+    "agent_listing_delta": FAM_LISTING,
+    "mcp_instructions_delta": FAM_LISTING,
+    "nested_memory": FAM_LISTING,
+    "hook_success": FAM_HOOK,
+    "hook_additional_context": FAM_HOOK,
+    "hook_system_message": FAM_HOOK,
+    "file": FAM_FILE,
+    "edited_text_file": FAM_FILE,
+    "opened_file_in_ide": FAM_FILE,
+    "directory": FAM_FILE,
+    "selected_lines_in_ide": FAM_FILE,
+    "total_tokens_reminder": FAM_BOOKKEEPING,
+    "task_reminder": FAM_BOOKKEEPING,
+    "date_change": FAM_BOOKKEEPING,
+    "queued_command": FAM_BOOKKEEPING,
+    "auto_mode": FAM_BOOKKEEPING,
+    "plan_mode_exit": FAM_BOOKKEEPING,
+    "command_permissions": FAM_BOOKKEEPING,
+    "diagnostics": FAM_BOOKKEEPING,
+}
+
+
+def attach_family(t: str) -> str:
+    """Which cost source an attachment type belongs to.
+
+    Unknown types are NOT guessed into a family. A new Claude Code release
+    inventing a type should surface as unrecognised in the report, where
+    someone will notice it, rather than silently inflating whichever family a
+    substring match happened to suggest.
+    """
+    return ATTACH_FAMILY.get(t, FAM_OTHER)
+
 
 @dataclass
 class Session:
@@ -176,6 +227,11 @@ class Session:
     images: int = 0
     mtime: float = 0.0
     is_subagent: bool = False
+    # attachment tokens and record counts keyed by Claude Code's own
+    # `attachment.type`, so the report can say which cost source it is looking
+    # at instead of averaging four of them together.
+    attach_types: dict = field(default_factory=dict)
+    attach_counts: dict = field(default_factory=dict)
 
     @property
     def content_total(self) -> int:
@@ -381,8 +437,13 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
 
             if kind == "attachment":
                 if not usage_only:
-                    _bump(s.buckets, BUCKET_ATTACH,
-                          toks(json.dumps(rec.get("attachment"), default=str)))
+                    att = rec.get("attachment")
+                    n = toks(json.dumps(att, default=str))
+                    _bump(s.buckets, BUCKET_ATTACH, n)
+                    kind_ = (att.get("type") if isinstance(att, dict) else None)
+                    kind_ = str(kind_) if kind_ else "unlabelled"
+                    _bump(s.attach_types, kind_, n)
+                    _bump(s.attach_counts, kind_, 1)
                 continue
             if kind == "system":
                 if not usage_only:
@@ -591,6 +652,21 @@ class Fleet:
         a count of one or the other -- never of ``sessions`` under the name
         "sessions", which is what made --limit misreport itself."""
         return [s for s in self.sessions if not s.is_subagent]
+    def attach_types(self) -> dict:
+        """Attachment tokens by Claude Code's own type string."""
+        return self.merged("attach_types")
+
+    def attach_counts(self) -> dict:
+        """Attachment record counts by type."""
+        return self.merged("attach_counts")
+
+    def attach_families(self) -> dict:
+        """Attachment tokens grouped into the four cost sources plus unknowns."""
+        out = {}
+        for t, n in self.attach_types().items():
+            _bump(out, attach_family(t), n)
+        return out
+
     def mcp_tools_called(self) -> set:
         """Distinct MCP TOOLS invoked, as ``mcp__<server>__<tool>``.
 

@@ -45,8 +45,9 @@ from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from transcripts import (PRICE, cd_shape, pct, quantile,  # noqa: E402
-                         tokenizer_name)
+from transcripts import (FAM_BOOKKEEPING, FAM_FILE, FAM_HOOK,  # noqa: E402
+                         FAM_LISTING, FAM_OTHER, PRICE, attach_family,
+                         cd_shape, pct, quantile, tokenizer_name)
 
 
 def to_spend(fleet, share_pct: float) -> float:
@@ -701,6 +702,20 @@ def d_reasoning_cost(fleet, mach):
 
 
 def d_attachments(fleet, mach):
+    """Content the harness injects, rather than anything a tool returned.
+
+    Four unrelated cost sources with four unrelated fixes, reported as one
+    number under one description -- "@-mentions, IDE selections, directory
+    listings" -- with one action: reference paths rather than @-mentioning
+    whole files. On the machine that reported this, that action addressed 3.8%
+    of the figure printed beside it, while 73.6% was the harness's own skill
+    and tool listings, which no amount of not-@-mentioning will touch.
+
+    This machine is close to the mirror image -- 36.6% real file content, 34.2%
+    listings -- so the old advice was right here and wrong there, from the same
+    detector at the same threshold. That is exactly the claim the tool makes
+    about itself, and it could not make it while the bucket was one figure.
+    """
     buckets = fleet.buckets()
     at = buckets.get("attachments", 0)
     if not at:
@@ -708,19 +723,118 @@ def d_attachments(fleet, mach):
     share = pct(at, fleet.content_total())
     if share < 8:
         return None
+    fams = fleet.attach_families()
+    types = fleet.attach_types()
+
+    ev = ["attachments/injections ~{:,} tokens ({:.1f}% of content) — injected "
+          "by the harness, not returned by a tool call".format(at, share)]
+    for fam, tok in sorted(fams.items(), key=lambda kv: -kv[1]):
+        members = sorted(((t, n) for t, n in types.items()
+                          if attach_family(t) == fam), key=lambda kv: -kv[1])
+        detail = ", ".join("%s %.0f%%" % (t, pct(n, at)) for t, n in members[:3])
+        ev.append("    {:>5.1f}%  {:<20}  {}".format(pct(tok, at), fam, detail))
+
+    unknown = sorted(((t, n) for t, n in types.items()
+                      if attach_family(t) == FAM_OTHER), key=lambda kv: -kv[1])
+    advice = {
+        FAM_LISTING:
+            "{:.0f}% of this is the harness's own skill, tool and agent "
+            "listings. They arrive once per session and are then re-read on "
+            "every turn after, so the lever is how many skills and MCP servers "
+            "are installed — not how you write prompts. `preamble` measures the "
+            "same tokens from the other end; do not count them twice.",
+        FAM_FILE:
+            "{:.0f}% is actual file content. Reference paths rather than "
+            "@-mentioning whole files when the agent can read the part it "
+            "needs — this is the share that advice applies to.",
+        FAM_HOOK:
+            "{:.0f}% is hook output. See `hook-output`, which prices it and "
+            "says what to do about it.",
+        FAM_BOOKKEEPING:
+            "{:.0f}% is fixed harness bookkeeping — token reminders, task "
+            "reminders, date changes. Named here so nobody hunts it: there is "
+            "no setting that removes it and it is not worth your time.",
+        FAM_OTHER:
+            "{:.0f}% is in attachment types this version does not recognise ("
+            + ", ".join(t for t, _n in unknown[:4]) +
+            "). Claude Code adds types between releases — if this share is "
+            "large, the family map in transcripts.py is behind.",
+    }
+    actions = [advice[f].format(pct(fams[f], at))
+               for f, _n in sorted(fams.items(), key=lambda kv: -kv[1])
+               if f in advice and pct(fams[f], at) >= 10]
+    if not actions:
+        actions = ["No single source dominates this bucket; the family split "
+                   "above is the finding."]
     return Finding(
         id="attachments",
-        title="File injections are a large share of content",
+        title="Harness-injected content is a large share of content",
         severity="low", confidence="estimated",
         saving_pct=to_spend(fleet, share),
         gate=Gate("any", [Cond("attachment share of content", share, 8, unit="%")]),
-        evidence=["attachments/injections ~{:,} tokens ({:.1f}% of content)".format(
-            at, share),
-            "these are files pulled in automatically (@-mentions, IDE "
-            "selections, directory listings), not tool results"],
+        evidence=ev,
+        actions=actions)
+
+
+def d_hook_output(fleet, mach):
+    """Hooks that print on success pay for it on every turn after.
+
+    Invisible until the attachments bucket was split by type: pooled with file
+    injections, hook chatter read as @-mentions and got @-mention advice. On
+    the reporting machine it is 24,389 records at ~51 per session and a median
+    of 81 tokens -- roughly 4,100 tokens per session of output nobody reads,
+    re-read for the rest of the session.
+
+    This is the shape a detector is supposed to have and most of the catalogue
+    does not: a machine with no hooks, or with hooks that stay quiet when they
+    succeed, pays exactly zero and hears nothing. This machine is one of those
+    -- 375 tokens in total -- so it stays silent here.
+    """
+    types = fleet.attach_types()
+    counts = fleet.attach_counts()
+    tok = sum(v for k, v in types.items() if attach_family(k) == FAM_HOOK)
+    recs = sum(v for k, v in counts.items() if attach_family(k) == FAM_HOOK)
+    if not tok or not recs:
+        return None
+    n_sess = len(fleet.sessions) or 1
+    per_sess = tok / float(n_sess)
+    gate = Gate("all", [
+        Cond("hook output per session", per_sess, 1000, unit="tokens"),
+        Cond("hook records", recs, 20),
+    ])
+    if per_sess < 1000 or recs < 20:
+        return None
+    share = pct(tok, fleet.content_total())
+    # The removable part is measured, not assumed: hook_success is by name the
+    # chatter a hook emits when nothing went wrong. hook_additional_context is
+    # doing a job and is left out of the saving.
+    removable = types.get("hook_success", 0)
+    ev = ["{:,} hook records, ~{:,} tokens ({:.1f}% of content), "
+          "{:,.0f} tokens per session".format(recs, tok, share, per_sess),
+          "hook output lands in context and is re-read by every later turn in "
+          "the session, like anything else there"]
+    for t, n in sorted(types.items(), key=lambda kv: -kv[1]):
+        if attach_family(t) == FAM_HOOK:
+            ev.append("    {:>7,} tok  {:>6,} records  {}".format(
+                n, counts.get(t, 0), t))
+    if removable:
+        ev.append("{:,} of it is `hook_success` — emitted when nothing went "
+                  "wrong".format(removable))
+    return Finding(
+        id="hook-output",
+        title="Hooks print on success, and it is re-read all session",
+        severity="medium", confidence="estimated",
+        assumption="a hook silent on success emits none of its hook_success "
+                   "output; other hook output is doing a job and is not counted",
+        saving_pct=to_spend(fleet, pct(removable, fleet.content_total())),
+        gate=gate,
+        evidence=ev,
         actions=[
-            "Reference paths rather than @-mentioning whole files when the "
-            "agent can read the part it needs.",
+            "Make hooks print nothing when they succeed. A hook that exits 0 "
+            "with no output costs nothing; one that says \"ok\" costs that "
+            "message on every turn for the rest of the session.",
+            "Where a hook must report, send it to stderr or a log rather than "
+            "into the transcript.",
         ])
 
 
@@ -805,6 +919,7 @@ DETECTORS = [
     d_mcp_schema,
     d_repeat_reads,
     d_images,
+    d_hook_output,
     d_reasoning_cost,
     d_attachments,
 ]
@@ -820,7 +935,8 @@ CATALOGUE = {
     "repeat-reads": "Same files read many times",
     "images": "Screenshots accumulate in context",
     "reasoning-cost": "Billed output that is not in the transcript",
-    "attachments": "File injections are a large share of content",
+    "attachments": "Harness-injected content is a large share of content",
+    "hook-output": "Hooks print on success, and it is re-read all session",
 }
 
 

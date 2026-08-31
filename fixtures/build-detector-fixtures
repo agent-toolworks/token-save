@@ -98,12 +98,26 @@ def p_reasoning():
 
 
 def p_attachments():
-    """Injected files dominate content -> attachments."""
+    """Injected content dominates -> attachments.
+
+    Deliberately MIXED, because the bug in #9 was that the bucket was one
+    number covering four cost sources with four different fixes. A fixture
+    carrying only one of them cannot tell whether the split works, and the old
+    one wrote `{"kind": "file"}` with no `type` at all -- so every record in it
+    would now land in the unrecognised family and the split would look empty.
+    """
     recs, ctx = [], 20000
     for _ in range(30):
         recs.append(asst(usage(ctx, 500), [{"type": "text", "text": text_of(20)}]))
         recs.append({"type": "attachment",
-                     "attachment": {"kind": "file", "body": text_of(2000)}})
+                     "attachment": {"type": "edited_text_file",
+                                    "body": text_of(1200)}})
+        recs.append({"type": "attachment",
+                     "attachment": {"type": "skill_listing",
+                                    "body": text_of(700)}})
+        recs.append({"type": "attachment",
+                     "attachment": {"type": "total_tokens_reminder",
+                                    "body": text_of(100)}})
         ctx += 500
     return recs
 
@@ -175,12 +189,30 @@ def p_subagents(out, name):
                 fh.write(json.dumps(r) + "\n")
 
 
+def p_hooks():
+    """A hook that announces its own success on every turn -> hook-output.
+
+    Small records, many of them: the shape that hid inside `attachments` and
+    got @-mention advice. The opposite fleet is every other fixture here, none
+    of which emits a hook record, so the detector has to stay silent on them.
+    """
+    recs, ctx = [], 20000
+    for _ in range(60):
+        recs.append(asst(usage(ctx, 500), [{"type": "text", "text": text_of(20)}]))
+        recs.append({"type": "attachment",
+                     "attachment": {"type": "hook_success",
+                                    "body": text_of(80)}})
+        ctx += 500
+    return recs
+
+
 PROFILES = {
     "verbose": (p_verbose, "output-verbosity"),
     "reasoning": (p_reasoning, "reasoning-cost"),
     "attachments": (p_attachments, "attachments"),
     "images": (p_images, "images"),
     "rereads": (p_rereads, "repeat-reads"),
+    "hooks": (p_hooks, "hook-output"),
     "subagents": (None, "subagent-cost"),   # writes its own tree
 }
 

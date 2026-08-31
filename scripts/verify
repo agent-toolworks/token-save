@@ -389,10 +389,11 @@ head_ "5. DETECTOR COVERAGE  (every detector has something that fires it)"
 # fire. That is only fair if the existing ones are held to the same bar, so
 # this fails when a detector in CATALOGUE has no profile covering it.
 "$FIX/build-detector-fixtures" --out "$TMP" >/dev/null 2>&1 || true
-declare -a FLEETS=(verbose reasoning attachments images rereads subagents chatter bulk)
+declare -a FLEETS=(verbose reasoning attachments images rereads subagents hooks chatter bulk)
 declare -a covered=()
 for prof in verbose:output-verbosity reasoning:reasoning-cost attachments:attachments \
-            images:images rereads:repeat-reads subagents:subagent-cost; do
+            images:images rereads:repeat-reads subagents:subagent-cost \
+            hooks:hook-output; do
   name=${prof%%:*}; want=${prof##*:}
   got=$(bounded 60 "$TS" advise --root "$TMP/$name" --json 2>/dev/null \
         | python3 -c 'import json,sys;print(",".join(f["id"] for f in json.load(sys.stdin)["findings"]))' 2>/dev/null)
@@ -610,6 +611,77 @@ MG
 [[ $mg == CLEAR ]] && ok "gate margin: ANY takes the max, ALL the min, flags abstain" \
                    || bad "margin arithmetic wrong" \
                           "${mg//|/$'\n        '}"
+
+# The attachments bucket was one number covering four cost sources with four
+# different fixes, so its advice could only ever be right for whichever source
+# happened to dominate. Two things are pinned: the split reaches the families,
+# and an unknown type is NOT guessed into one. Claude Code's type strings move
+# between releases, and a closed vocabulary meeting a moving target is a bug
+# this repo has already had more than once.
+fam=$(python3 - "$TMP" "$ROOT" <<'FAM'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[2], "scripts", "lib"))
+from transcripts import (FAM_BOOKKEEPING, FAM_FILE, FAM_HOOK, FAM_LISTING,
+                         FAM_OTHER, Fleet, attach_family)
+
+bad = []
+for t, want in (("skill_listing", FAM_LISTING),
+                ("deferred_tools_delta", FAM_LISTING),
+                ("hook_success", FAM_HOOK),
+                ("edited_text_file", FAM_FILE),
+                ("total_tokens_reminder", FAM_BOOKKEEPING)):
+    got = attach_family(t)
+    if got != want:
+        bad.append("%s classified as %r, expected %r" % (t, got, want))
+# A type invented by a future release must surface, not be absorbed.
+for t in ("some_future_delta", "skill_listing_v2", ""):
+    if attach_family(t) != FAM_OTHER:
+        bad.append("unknown type %r was absorbed into %r instead of %r"
+                   % (t, attach_family(t), FAM_OTHER))
+
+fams = Fleet.load(root=os.path.join(sys.argv[1], "attachments")).attach_families()
+present = {k for k, v in fams.items() if v}
+if len(present) < 3:
+    bad.append("attachments fixture reached only %d families (%s); the split "
+               "is not being exercised" % (len(present), sorted(present)))
+if FAM_OTHER in present:
+    bad.append("attachments fixture produced unrecognised types: the fixture "
+               "and the family map disagree")
+print("|".join(bad) if bad else "CLEAR")
+FAM
+)
+[[ $fam == CLEAR ]] && ok "attachment families split, and unknown types stay unrecognised" \
+                    || bad "attachment family classification wrong" \
+                           "${fam//|/$'\n        '}"
+
+# hook-output must be SILENT on a machine whose hooks do not chatter. This is
+# the bash-chatter/bash-bulk discipline applied to a new detector: firing
+# everywhere would make it decoration, and #5 exists because six detectors
+# already do that.
+quiet=$(python3 - "$TMP" "$ROOT" <<'QUIET'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[2], "scripts", "lib"))
+import advise, machine
+from transcripts import Fleet
+tmp = sys.argv[1]
+mach = machine.collect()
+bad = []
+fired = {f.id for f in advise.run(Fleet.load(root=os.path.join(tmp, "hooks")), mach)}
+if "hook-output" not in fired:
+    bad.append("hook-output did not fire on the hooks fleet")
+for other in ("attachments", "verbose", "rereads", "images"):
+    d = os.path.join(tmp, other)
+    if not os.path.isdir(d):
+        continue
+    if "hook-output" in {f.id for f in advise.run(Fleet.load(root=d), mach)}:
+        bad.append("hook-output fired on the %r fleet, which has no hook "
+                   "records at all" % other)
+print("|".join(bad) if bad else "CLEAR")
+QUIET
+)
+[[ $quiet == CLEAR ]] && ok "hook-output fires on hook chatter and is silent without it" \
+                      || bad "hook-output does not discriminate" \
+                             "${quiet//|/$'\n        '}"
 
 # chatter/bulk cover the two Bash detectors and both cover preamble and
 # session-length, which every long fixture trips.
