@@ -39,7 +39,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import report as R  # noqa: E402
-from transcripts import PRICE, Session, find_transcripts, human, parse, pct  # noqa: E402
+from transcripts import (PRICE, Session, find_sessions, human,  # noqa: E402
+                         parse, pct)
 
 # Recent turns used for the growth rate. Short enough to react to a change of
 # activity, long enough that one big file read does not dominate.
@@ -47,7 +48,18 @@ DEFAULT_WINDOW = 20
 
 
 def newest_transcript() -> str:
-    paths = find_transcripts()
+    """The most recent MAIN-CHAIN transcript.
+
+    find_transcripts() would include subagents, and a subagent has written
+    most recently precisely while it is running -- which is when the
+    statusline renders. Measured on a sandbox: auto-selecting the subagent
+    reported 45.4K of context against the session's actual 372.1K, a breakeven
+    of 159 turns against 2.4, and dropped the `clear>2t` warning altogether.
+    The misselection also correlates with heavy sessions, because heavy
+    sessions are the ones that delegate, so it concentrated in exactly the
+    population this command exists to warn.
+    """
+    paths = find_sessions()
     if not paths:
         return ""
     return max(paths, key=lambda p: os.path.getmtime(p))

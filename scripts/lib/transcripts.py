@@ -386,6 +386,31 @@ def find_transcripts(root: str = None, project: str = None) -> list:
     return sorted(set(flat) | set(deep))
 
 
+def find_sessions(root: str = None, project: str = None) -> list:
+    """Main-chain transcripts only -- one per session a human actually had.
+
+    `find_transcripts()` changed meaning when discovery became recursive: it
+    returns TRANSCRIPTS, and a subagent has one of its own. Every caller that
+    kept reading it as "sessions" has since been found separately, by accident,
+    one at a time:
+
+        #8   `--limit N` counted files, so 14 of "25 most recent sessions"
+             were subagent transcripts
+        #16  a crash, when a subagent-era path met a shape no fixture had
+        #22  `ts now` reported on a subagent whenever one had written more
+             recently -- which is the state of the world WHILE a subagent runs,
+             so the statusline understated context 8.2x and dropped its clear
+             warning exactly when it mattered
+
+    So the distinction is now something a caller has to state. Use this when
+    you mean sessions; use find_transcripts() when you mean everything that
+    was billed, which is what cost accounting wants.
+    """
+    root = root or transcript_dir()
+    return [p for p in find_transcripts(root, project)
+            if not is_subagent_path(p, root)]
+
+
 def _project_of(path: str, root: str) -> str:
     """The project directory a transcript belongs to, however deep it sits."""
     try:

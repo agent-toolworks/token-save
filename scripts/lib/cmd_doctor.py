@@ -18,8 +18,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import machine  # noqa: E402
 import report as R  # noqa: E402
-from transcripts import (Fleet, find_transcripts, quantile,  # noqa: E402
-                         tokenizer_name, transcript_dir)
+from transcripts import (Fleet, find_sessions,  # noqa: E402
+                         find_transcripts, quantile, tokenizer_name,
+                         transcript_dir)
 
 HOME = os.path.expanduser("~")
 
@@ -39,9 +40,14 @@ def _environment() -> str:
     # which paths are in effect, so naming one that is not is the worst place
     # for this mistake.
     out.append(R.kv("transcripts", _short(transcript_dir())))
-    n = len(find_transcripts())
+    # Both populations, named. "transcripts found" was one number covering
+    # two things, which is the conflation that produced #8, #16 and #22.
+    all_paths = find_transcripts()
+    n = len(all_paths)
+    n_sess = len(find_sessions())
     out.append(R.kv("transcripts found", "{:,}".format(n),
-                    "" if n else _nothing_found_hint()))
+                    ("%d session(s) + %d subagent transcript(s)"
+                     % (n_sess, n - n_sess)) if n else _nothing_found_hint()))
     return "\n".join(out)
 
 

@@ -1775,6 +1775,108 @@ OUTV
 [[ $outv == CLEAR ]] && ok "output-verbosity counts re-reads, and only of STORED output" \
                      || bad "output-verbosity arithmetic wrong" "${outv//|/$'\n        '}"
 
+# `ts now` auto-selected the most recently written TRANSCRIPT, which since
+# recursive discovery includes subagents -- and a subagent has written most
+# recently precisely while it is running, which is when the statusline renders.
+# It understated context 8.2x, overstated breakeven 66x, and dropped the clear
+# warning altogether, concentrated in heavy sessions because those are the ones
+# that delegate. The reporter's exact scenario is rebuilt here.
+nowsub=$(python3 - "$TMP" "$ROOT" <<'NOWSUB'
+import json, os, subprocess, sys
+
+tmp, root = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+proj = os.path.join(tmp, "nowsub", "-Users-x-myrepo")
+os.makedirs(os.path.join(proj, "main-sess", "subagents"), exist_ok=True)
+
+
+def write(path, turns, ctx0, step):
+    with open(path, "w") as fh:
+        ctx = ctx0
+        for _ in range(turns):
+            fh.write(json.dumps({"type": "assistant", "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "x " * 40}],
+                "usage": {"input_tokens": 0, "cache_creation_input_tokens": 0,
+                          "cache_read_input_tokens": ctx,
+                          "output_tokens": 200}}}) + "\n")
+            ctx += step
+
+
+main = os.path.join(proj, "main-sess.jsonl")
+sub = os.path.join(proj, "main-sess", "subagents", "agent-ab.jsonl")
+write(main, 40, 60102, 8000)        # heavy: grows to 372K
+write(sub, 12, 42102, 300)          # light: 45K, and written LAST
+os.utime(main, (1_800_000_000, 1_800_000_000))
+os.utime(sub, (1_800_000_060, 1_800_000_060))
+
+env = dict(os.environ)
+env["TS_TRANSCRIPT_DIR"] = os.path.join(tmp, "nowsub")
+bad = []
+r = subprocess.run([ts, "now", "--statusline"], env=env, input="",
+                   capture_output=True, text=True)
+line = (r.stdout or "").strip()
+if "372" not in line:
+    bad.append("statusline reports %r -- it selected the subagent, not the "
+               "session (expected the 372K main thread)" % line)
+if "clear>" not in line:
+    bad.append("the clear warning is missing from %r; it is dropped exactly "
+               "when it matters" % line)
+
+r = subprocess.run([ts, "now"], env=env, capture_output=True, text=True)
+if "agent-ab" in (r.stdout or ""):
+    bad.append("`ts now` names a subagent transcript as THIS SESSION")
+print("|".join(bad) if bad else "CLEAR")
+NOWSUB
+)
+[[ $nowsub == CLEAR ]] && ok "ts now reports the session, not a subagent that wrote more recently" \
+                       || bad "ts now selects a subagent" "${nowsub//|/$'\n        '}"
+
+# find_transcripts() means TRANSCRIPTS; find_sessions() means SESSIONS. Reading
+# the first as the second has now caused three separate defects (#8, #16, #22),
+# each found by accident, one at a time. Every caller is listed here with why,
+# so a fourth has to be justified rather than discovered later.
+callers=$(python3 - "$ROOT" <<'CALLERS'
+import os, re, sys
+root = sys.argv[1]
+ALLOWED = {
+    # file                      why it wants every transcript, not every session
+    "scripts/lib/transcripts.py": "defines it; Fleet.load wants everything billed",
+    "scripts/lib/cmd_doctor.py":  "reports both populations, counted separately",
+    "scripts/verify":             "asserts discovery itself",
+}
+bad = []
+for dirpath, _d, names in os.walk(root):
+    if ".git" in dirpath:
+        continue
+    for n in names:
+        p = os.path.join(dirpath, n)
+        rel = os.path.relpath(p, root)
+        if not (n.endswith(".py") or rel in ("scripts/ts", "scripts/verify")):
+            continue
+        try:
+            body = open(p, errors="replace").read()
+        except OSError:
+            continue
+        # Match the IMPORT, not any mention: a module that does not import it
+        # cannot call it, and docstrings legitimately name it while explaining
+        # why they use find_sessions() instead.
+        imports = re.findall(r"^from transcripts import .*?(?=\n(?!\s))", body,
+                             re.M | re.S)
+        if any(re.search(r"\bfind_transcripts\b", i) for i in imports) \
+                and rel not in ALLOWED:
+            bad.append("%s imports find_transcripts(); if it means SESSIONS use "
+                       "find_sessions(), else add it to the list in verify with "
+                       "a reason" % rel)
+        if rel == "scripts/verify" and "find_transcripts(" not in body:
+            bad.append("verify no longer exercises find_transcripts at all")
+print("|".join(bad) if bad else "CLEAR")
+CALLERS
+)
+[[ $callers == CLEAR ]] && ok "every find_transcripts() caller is deliberate; sessions use find_sessions()" \
+                        || bad "a new find_transcripts() caller appeared" \
+                               "${callers//|/$'\n        '}"
+
 # chatter/bulk cover the two Bash detectors and both cover preamble and
 # session-length, which every long fixture trips.
 covered+=(bash-chatter bash-bulk preamble session-length)
