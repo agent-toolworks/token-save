@@ -435,6 +435,84 @@ else
   bad "subagent discovery broken" "${disc//|/$'\n        '}"
 fi
 
+# --limit is documented as the N most recent SESSIONS. Recursive discovery made
+# "file" and "session" different things -- a subagent transcript is written the
+# moment it runs, so it sorts to the top by mtime -- and the cut happened before
+# classification. On the reporting machine --limit 25 was 11 sessions and 14
+# subagent transcripts, and the run still called itself sessions=25. The tree
+# below has every subagent NEWER than every main session, which is that shape.
+lim=$(python3 - "$TMP/limit" "$ROOT" <<'LIM'
+import json, os, sys, time
+sys.path.insert(0, os.path.join(sys.argv[2], "scripts", "lib"))
+from transcripts import Fleet
+
+root = sys.argv[1]
+proj = os.path.join(root, "proj")
+
+
+def write(path, turns, when):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        for _ in range(turns):
+            fh.write(json.dumps({"type": "assistant", "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "alpha beta gamma delta"}],
+                "usage": {"input_tokens": 0, "cache_creation_input_tokens": 0,
+                          "cache_read_input_tokens": 1000,
+                          "output_tokens": 50}}}) + "\n")
+    os.utime(path, (when, when))
+
+
+now = time.time()
+for n in range(4):                       # s0 oldest .. s3 newest
+    write(os.path.join(proj, "s%d.jsonl" % n), 6, now - 400 + n * 100)
+for sess, count in (("s3", 3), ("s2", 2), ("s0", 1)):
+    for k in range(count):
+        write(os.path.join(proj, sess, "subagents", "a%d.jsonl" % k), 4, now)
+
+bad = []
+
+
+def counts(**kw):
+    f = Fleet.load(root=root, **kw)
+    return ([s for s in f.sessions if not s.is_subagent],
+            [s for s in f.sessions if s.is_subagent])
+
+mains, subs = counts(limit=2)
+ids = sorted(s.session_id for s in mains)
+if ids != ["s2", "s3"]:
+    bad.append("--limit 2 picked %s, expected the two newest ['s2', 's3']" % ids)
+if len(subs) != 5:
+    bad.append("--limit 2 kept %d subagents, expected the 5 belonging to s2/s3"
+               % len(subs))
+mains, subs = counts(limit=1)
+if [s.session_id for s in mains] != ["s3"] or len(subs) != 3:
+    bad.append("--limit 1 gave %s + %d subagents, expected ['s3'] + 3"
+               % ([s.session_id for s in mains], len(subs)))
+# s0's subagent must not ride along on a window that excludes s0.
+if any(s.path.split(os.sep)[-3] == "s0" for s in subs):
+    bad.append("a subagent of an excluded session was kept")
+mains, subs = counts()
+if len(mains) != 4 or len(subs) != 6:
+    bad.append("unlimited load changed: %d sessions + %d subagents, expected 4 + 6"
+               % (len(mains), len(subs)))
+print("|".join(bad))
+LIM
+)
+if [[ -z $lim ]]; then
+  ok "--limit N selects N sessions and brings their subagents with them"
+else
+  bad "--limit still counts files, not sessions" "${lim//|/$'\n        '}"
+fi
+
+# A --json consumer could not tell the two populations apart, which is how the
+# mislabel stayed invisible from the outside.
+counted=$("$TS" audit --root "$TMP/limit" --limit 2 --json 2>/dev/null | python3 -c \
+  'import json,sys; d=json.load(sys.stdin); print(d.get("sessions"), d.get("subagent_transcripts"))' 2>/dev/null)
+[[ $counted == "2 5" ]] \
+  && ok "audit --json splits sessions from subagent_transcripts" \
+  || bad "audit --json session counts wrong" "got '$counted', expected '2 5'"
+
 # chatter/bulk cover the two Bash detectors and both cover preamble and
 # session-length, which every long fixture trips.
 covered+=(bash-chatter bash-bulk preamble session-length)

@@ -238,7 +238,8 @@ def _as_json(fleet: Fleet) -> str:
     outs = sorted(fleet.bash_out())
     return json.dumps({
         "tokenizer": tokenizer_name(),
-        "sessions": len(fleet.sessions),
+        "sessions": len(fleet.main_sessions()),
+        "subagent_transcripts": len(fleet.subagents()),
         "turns": fleet.turns(),
         "billed": fleet.billed(),
         "cost_units": round(fleet.cost_units(), 1),
@@ -294,9 +295,11 @@ def main(argv=None) -> int:
         print(_as_json(fleet))
         return 0
 
-    print(R.bold("\n  %d sessions  |  %s  |  %s"
-                 % (len(fleet.sessions), "{:,} turns".format(fleet.turns()),
-                    tokenizer_name())))
+    subn = len(fleet.subagents())
+    print(R.bold("\n  %d sessions%s  |  %s  |  %s"
+                 % (len(fleet.main_sessions()),
+                    " + %d subagent transcripts" % subn if subn else "",
+                    "{:,} turns".format(fleet.turns()), tokenizer_name())))
     print(_billed_block(fleet))
     print(_content_block(fleet))
     print(_amplification_block(fleet))

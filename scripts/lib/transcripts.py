@@ -269,6 +269,61 @@ def is_subagent_path(path: str, root: str) -> bool:
     return len(rel.split(os.sep)) > 2
 
 
+
+def parent_session_of(path: str, root: str):
+    """The session id a subagent transcript belongs to; None for a main one.
+
+    Structural, like is_subagent_path(): both layouts nest the agent under the
+    session directory -- ``<project>/<session-id>/subagents/<agent>.jsonl`` and
+    ``<project>/<session-id>/<agent>.jsonl`` -- so the second path component
+    names the parent either way.
+    """
+    try:
+        rel = os.path.relpath(path, root)
+    except ValueError:
+        return None
+    parts = rel.split(os.sep)
+    return parts[1] if len(parts) > 2 else None
+
+
+def _mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def limit_to_sessions(paths: list, root: str, limit: int) -> list:
+    """The N most recent SESSIONS, each with the subagents it spawned.
+
+    ``--limit N`` is documented as the N most recent sessions, and until
+    recursive discovery it was one: every file found was a main transcript.
+    Now a subagent's file is written when it runs and sorts by mtime among
+    real sessions, so taking the N most recent FILES returns fewer and fewer
+    sessions the more a machine delegates. On the machine that reported this,
+    ``--limit 25`` was 11 sessions and 14 subagent transcripts, and the report
+    still said ``sessions=25``.
+
+    Two things are wrong with that and only one is the label. Because the cut
+    happens before classification, a mixed population is fed to every
+    downstream statistic for the run -- and the bias grows with exactly the
+    behaviour v0.7.0 was added to measure.
+
+    So classify first, then cut, then pull each kept session's subagents back
+    in. Dropping them instead would be cheaper and would reintroduce, inside
+    the window, the very under-count recursive discovery exists to fix. An
+    orphan subagent -- parent not among the N, or no longer on disk -- belongs
+    to no session in this window and is left out.
+    """
+    mains, subs = [], []
+    for p in paths:
+        (subs if is_subagent_path(p, root) else mains).append(p)
+    mains = sorted(mains, key=lambda p: -_mtime(p))[:limit]
+    keep = set(os.path.basename(p)[:-len(".jsonl")] for p in mains)
+    return sorted(mains + [p for p in subs
+                           if parent_session_of(p, root) in keep])
+
+
 def _flush_usage(sess: "Session", usage: dict) -> None:
     """Apply one MESSAGE's usage to a session. See the note in parse()."""
     cr = usage.get("cache_read_input_tokens") or 0
@@ -465,7 +520,7 @@ class Fleet:
         root = root or transcript_dir()
         paths = find_transcripts(root, project)
         if limit:
-            paths = sorted(paths, key=lambda p: -os.path.getmtime(p))[:limit]
+            paths = limit_to_sessions(paths, root, limit)
         return cls(sessions=[parse(p, root=root) for p in paths])
 
     # -- aggregates ---------------------------------------------------------
@@ -529,6 +584,13 @@ class Fleet:
                     if len(parts) == 3 and parts[1]:
                         out.add(parts[1])
         return out
+
+    def main_sessions(self) -> list:
+        """Sessions proper. With subagents() this partitions ``sessions``,
+        which is every transcript found and what the cost totals sum. Report
+        a count of one or the other -- never of ``sessions`` under the name
+        "sessions", which is what made --limit misreport itself."""
+        return [s for s in self.sessions if not s.is_subagent]
 
     def subagents(self) -> list:
         return [s for s in self.sessions if s.is_subagent]

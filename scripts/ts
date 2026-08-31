@@ -51,7 +51,8 @@ COMMON OPTIONS  (audit, advise)
                    the "=". Claude Code project directories begin with "-",
                    so the space-separated form is read as another flag and
                    exits 2.
-  --limit N        Only the N most recent sessions.
+  --limit N        Only the N most recent sessions, each with the subagent
+                   transcripts it spawned.
   --root DIR       Transcript root (default ~/.claude/projects).
   --json           Machine-readable output.
 

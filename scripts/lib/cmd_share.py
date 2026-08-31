@@ -89,7 +89,8 @@ def build(fleet: Fleet, mach: dict) -> dict:
             "tokenizer": tokenizer_name(),
         },
         "scale": {
-            "sessions": len(fleet.sessions),
+            "sessions": len(fleet.main_sessions()),
+            "subagent_transcripts": len(fleet.subagents()),
             "sessions_substantive": len(subs),
             "turns": fleet.turns(),
         },
@@ -165,7 +166,7 @@ def main(argv=None) -> int:
 
     print(R.heading("SHAREABLE PROFILE"))
     print(R.kv("written to", path, "%d bytes" % len(text)))
-    print(R.kv("sessions", "{:,}".format(len(fleet.sessions))))
+    print(R.kv("sessions", "{:,}".format(len(fleet.main_sessions()))))
     print(R.kv("amplification", "%.0fx" % fleet.amplification()))
     print(R.kv("detectors fired", "%d of %d"
                % (len(profile["findings"]), len(A.CATALOGUE))))

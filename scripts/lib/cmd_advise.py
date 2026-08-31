@@ -98,7 +98,8 @@ def main(argv=None) -> int:
     if args.json:
         print(json.dumps({
             "tokenizer": tokenizer_name(),
-            "sessions": len(fleet.sessions),
+            "sessions": len(fleet.main_sessions()),
+            "subagent_transcripts": len(fleet.subagents()),
             "turns": fleet.turns(),
             "amplification": round(fleet.amplification(), 1),
             "findings": [{
@@ -113,8 +114,11 @@ def main(argv=None) -> int:
         }, indent=1))
         return 0
 
-    print(R.bold("\n  %d sessions  |  %s turns  |  %.0fx amplification  |  %s"
-                 % (len(fleet.sessions), "{:,}".format(fleet.turns()),
+    subn = len(fleet.subagents())
+    print(R.bold("\n  %d sessions%s  |  %s turns  |  %.0fx amplification  |  %s"
+                 % (len(fleet.main_sessions()),
+                    " + %d subagent transcripts" % subn if subn else "",
+                    "{:,}".format(fleet.turns()),
                     fleet.amplification(), tokenizer_name())))
     _render(findings, fleet, args.all)
     print()
