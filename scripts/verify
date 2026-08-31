@@ -732,6 +732,80 @@ BOM
                     || bad "BOM / unreadable-config handling wrong" \
                            "${bom//|/$'\n        '}"
 
+# A target it cannot write raised an unhandled PermissionError out of shutil,
+# mid-write, and left a backup with nothing to pair with -- one more per retry.
+# A read-only config is not exotic: chmod 444 is deliberate, dotfile managers
+# write targets read-only, mounts are read-only, and on Windows another process
+# can hold the file. The message must say the one thing a reader needs after a
+# failed write, which is that nothing was modified.
+ro=$(python3 - "$TMP" "$ROOT" <<'RO'
+import os, subprocess, sys
+
+tmp, root = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+bad = []
+
+
+def backups(d):
+    return [n for n in os.listdir(d) if ".ts-backup-" in n]
+
+
+for fid, name, body, applied_first in (
+    ("tool-search", "settings.json", '{\n  "model": "opus"\n}\n', False),
+    ("terse-output", "CLAUDE.md", "# Notes\n", False),
+    ("terse-output", "CLAUDE.md", "# Notes\n", True),
+):
+    cfg = os.path.join(tmp, "ro-%s-%s" % (fid, applied_first))
+    os.makedirs(cfg, exist_ok=True)
+    path = os.path.join(cfg, name)
+    open(path, "w").write(body)
+    env = dict(os.environ)
+    env["CLAUDE_CONFIG_DIR"] = cfg
+    action = "apply"
+    if applied_first:
+        # Apply while writable, then make it read-only and revert, so the
+        # backup-then-write shape is exercised on the revert path too.
+        subprocess.run([ts, "fixes", "apply", fid, "--yes"], env=env,
+                       capture_output=True)
+        for n in backups(cfg):
+            os.remove(os.path.join(cfg, n))
+        action = "revert"
+    before = open(path, "rb").read()
+    os.chmod(path, 0o444)
+    try:
+        for _ in range(3):
+            args = [ts, "fixes", action, fid]
+            if action == "apply":
+                args.append("--yes")
+            r = subprocess.run(args, env=env, capture_output=True, text=True)
+            out = (r.stdout or "") + (r.stderr or "")
+            if "Traceback" in out:
+                bad.append("%s %s on a read-only target printed a traceback"
+                           % (fid, action))
+                break
+            if r.returncode == 0:
+                bad.append("%s %s reported success on a read-only target"
+                           % (fid, action))
+                break
+            if "nothing was modified" not in out:
+                bad.append("%s %s does not say the file was left alone: %r"
+                           % (fid, action, out.strip()[:90]))
+                break
+        left = backups(cfg)
+        if left:
+            bad.append("%s %s left %d orphan backup(s) after 3 failed "
+                       "attempts: %r" % (fid, action, len(left), left))
+        os.chmod(path, 0o644)
+        if open(path, "rb").read() != before:
+            bad.append("%s %s modified a file it could not write" % (fid, action))
+    finally:
+        os.chmod(path, 0o644)
+print("|".join(bad) if bad else "CLEAR")
+RO
+)
+[[ $ro == CLEAR ]] && ok "a read-only target fails cleanly and leaves no orphan backup" \
+                   || bad "read-only handling wrong" "${ro//|/$'\n        '}"
+
 # A corrupt settings.json must be refused, not overwritten. This is the one
 # failure mode that would destroy user configuration.
 printf '{ this is not json' > "$CLAUDE_CONFIG_DIR/settings.json"

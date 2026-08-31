@@ -51,6 +51,59 @@ def _backup(path: str) -> str:
     return dst
 
 
+def _write_error(path: str, exc: OSError) -> str:
+    """A failure message in the house style, not a stack trace.
+
+    Everything else here says what happened and what it means -- "does not
+    parse — fix it by hand first", "no change: already applied". A read-only
+    target got a Python traceback out of shutil instead, mid-write, which
+    leaves a reader with no idea whether their config survived. So the message
+    says the one thing that matters: nothing was modified.
+    """
+    detail = exc.strerror or str(exc)
+    try:
+        detail += " (mode %s)" % oct(os.stat(path).st_mode & 0o777)[2:]
+    except OSError:
+        pass
+    return "cannot write %s: %s — nothing was modified" % (path, detail)
+
+
+def _backup_and_write(path: str, text: str, append: bool = False):
+    """Back up and write as one operation. (ok, backup_path_or_message).
+
+    The backup used to be taken before a write that could still fail, so a
+    read-only target left an orphan copy with nothing to pair with -- and each
+    retry left another. Backups exist so a change can be undone; a directory
+    of backups from operations that never happened makes the one that matters
+    harder to find. A pre-flight writability check would race, so the backup
+    is removed on failure instead.
+
+    Failure can come from the backup as easily as from the write: copy2
+    propagates a 444 mode to the copy, so a second attempt cannot overwrite
+    it. Both are inside the guard.
+    """
+    backup = None
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        if os.path.isfile(path):
+            backup = _backup(path)
+        if append:
+            with open(path, "a", newline="") as fh:
+                fh.write(text)
+        else:
+            _write(path, text)
+        return True, backup
+    except OSError as exc:
+        if backup:
+            try:
+                os.remove(backup)
+            except OSError:
+                pass
+        return False, _write_error(path, exc)
+
+
 def _latest_backup(path: str):
     d = os.path.dirname(path) or "."
     base = os.path.basename(path) + ".ts-backup-"
@@ -133,8 +186,6 @@ def terse_apply():
     cur = _read(path)
     if (MARKER_BEGIN + "terse-output") in cur:
         return False, "already applied"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    backup = _backup(path) if os.path.isfile(path) else None
     block = "\n%sterse-output -->\n%s%sterse-output -->\n" % (
         MARKER_BEGIN, TERSE_BLOCK, MARKER_END)
     # A file with no trailing newline must not acquire one, or apply+revert is
@@ -151,10 +202,11 @@ def terse_apply():
     nl = _newline(cur)
     if nl != "\n":
         block = block.replace("\n", nl)
-    with open(path, "a", newline="") as fh:
-        fh.write(block)
+    ok, res = _backup_and_write(path, block, append=True)
+    if not ok:
+        return False, res
     return True, "appended to %s%s" % (
-        path, " (backup: %s)" % backup if backup else "")
+        path, " (backup: %s)" % res if res else "")
 
 
 def terse_revert():
@@ -179,8 +231,9 @@ def terse_revert():
     new = cur[:i] + cur[j:]
     if not trailing and not cur[j:]:
         new = new.rstrip("\r\n")   # apply() also had to terminate the last line
-    _backup(path)
-    _write(path, new)
+    ok, res = _backup_and_write(path, new)
+    if not ok:
+        return False, res
     return True, "removed the block from %s" % path
 
 # ---------------------------------------------------------------------------
@@ -357,7 +410,6 @@ def toolsearch_apply():
     if str((env or {}).get("ENABLE_TOOL_SEARCH")).lower() in ("true", "1", "on"):
         return False, "already applied"
 
-    backup = _backup(path) if os.path.isfile(path) else None
     unit = _indent_unit(raw) if raw.strip() else "  "
     nl = _newline(raw)
 
@@ -384,10 +436,11 @@ def toolsearch_apply():
             else:
                 new = raw[:inner[2]] + '"true"' + raw[inner[3]:]
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    _write(path, bom + new)
+    ok, res = _backup_and_write(path, bom + new)
+    if not ok:
+        return False, res
     return True, "set env.ENABLE_TOOL_SEARCH=true in %s%s" % (
-        path, " (backup: %s)" % backup if backup else "")
+        path, " (backup: %s)" % res if res else "")
 
 
 def toolsearch_revert():
@@ -404,8 +457,9 @@ def toolsearch_revert():
         new = _remove_member(raw, top, "env")   # the key was all env held
     else:
         new = _remove_member(raw, _find(raw, top, "env")[2], "ENABLE_TOOL_SEARCH")
-    _backup(path)
-    _write(path, bom + new)
+    ok, res = _backup_and_write(path, bom + new)
+    if not ok:
+        return False, res
     return True, "removed env.ENABLE_TOOL_SEARCH from %s" % path
 
 FIXES = {
