@@ -41,8 +41,17 @@ def _environment() -> str:
     out.append(R.kv("transcripts", _short(transcript_dir())))
     n = len(find_transcripts())
     out.append(R.kv("transcripts found", "{:,}".format(n),
-                    "" if n else "nothing to audit — set TS_TRANSCRIPT_DIR"))
+                    "" if n else _nothing_found_hint()))
     return "\n".join(out)
+
+
+def _nothing_found_hint() -> str:
+    """The last line carrying the #20 defect: it advised setting the variable
+    that was already set and already used. Same shape as the original bug, in
+    the one place that did not get updated with the rest."""
+    if os.environ.get("TS_TRANSCRIPT_DIR"):
+        return "nothing to audit — that is TS_TRANSCRIPT_DIR, which is set"
+    return "nothing to audit — set TS_TRANSCRIPT_DIR if yours live elsewhere"
 
 
 def _memory(mach) -> str:

@@ -1713,6 +1713,68 @@ PROF
 [[ $prof == CLEAR ]] && ok "share profile: schema pinned to its field set, tool_version is a real version" \
                      || bad "share profile schema drifted" "${prof//|/$'\n        '}"
 
+# output-verbosity priced output at its direct 5x rate only. Output is the one
+# component billed at the highest multiplier AND re-read by every later turn,
+# and the README's whole thesis is that a token costs its size times the turns
+# that re-read it -- so this was the one detector pricing size alone, in the
+# place the omission costs most.
+#
+# The trap, which the reporter hit first: the re-read base is STORED assistant
+# content, NOT billed output_tokens. Most billed output is reasoning that never
+# enters a transcript and is therefore never re-read. Using output_tokens
+# overstates the re-read burden 2.4x here and 2.8x on the reporting machine,
+# and the wrong number looks entirely plausible -- which is why it is pinned.
+outv=$(python3 - "$TMP" "$ROOT" <<'OUTV'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[2], "scripts", "lib"))
+import advise, machine
+from transcripts import Fleet, PRICE, pct
+
+mach = machine.collect()
+bad = []
+root = os.path.join(sys.argv[1], "verbose")
+fleet = Fleet.load(root=root)
+found = {f.id: f for f in advise.run(fleet, mach)}
+f = found.get("output-verbosity")
+if f is None:
+    print("output-verbosity did not fire on the verbose fleet")
+    raise SystemExit(0)
+
+bu = fleet.buckets()
+stored = (bu.get("assistant text", 0) + bu.get("assistant thinking", 0)
+          + bu.get("tool call inputs", 0))
+billed = fleet.billed()["output"]
+cost, ct = fleet.cost_units(), fleet.content_total()
+
+# The saving must be built from STORED content. Compute both and require the
+# detector to match the stored one -- the billed one is the plausible mistake.
+right = (pct(stored * PRICE["output"], cost) + advise.to_spend(fleet, pct(stored, ct))) * 0.20
+wrong = (pct(billed * PRICE["output"], cost) + advise.to_spend(fleet, pct(billed, ct))) * 0.20
+if abs(f.saving_pct - right) > 0.01:
+    bad.append("saving is %.3f, expected %.3f from the STORED base" % (f.saving_pct, right))
+if billed > stored and abs(f.saving_pct - wrong) < 0.01:
+    bad.append("saving matches the billed-output base (%.3f) -- unstored "
+               "reasoning is being counted as re-read, which it never is" % wrong)
+
+# It must actually include a re-read component, not just the direct cost.
+direct_only = pct(stored * PRICE["output"], cost) * 0.20
+if abs(f.saving_pct - direct_only) < 0.001 and stored:
+    bad.append("saving equals the direct cost alone; the re-read component is missing")
+
+# The two output detectors must partition rather than overlap: reasoning-cost
+# owns the unstored part, output-verbosity the stored part.
+src = open(os.path.join(sys.argv[2], "scripts", "lib", "advise.py")).read()
+ov = src[src.index("def d_output_verbosity"):src.index("def d_mcp_schema")]
+if "billed_out" in ov or 'b["output"] * PRICE["output"]) * 0.20' in ov:
+    bad.append("output-verbosity's saving reaches for billed output again")
+if "stored" not in ov:
+    bad.append("output-verbosity no longer distinguishes stored output")
+print("|".join(bad) if bad else "CLEAR")
+OUTV
+)
+[[ $outv == CLEAR ]] && ok "output-verbosity counts re-reads, and only of STORED output" \
+                     || bad "output-verbosity arithmetic wrong" "${outv//|/$'\n        '}"
+
 # chatter/bulk cover the two Bash detectors and both cover preamble and
 # session-length, which every long fixture trips.
 covered+=(bash-chatter bash-bulk preamble session-length)

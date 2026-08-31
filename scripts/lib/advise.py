@@ -576,34 +576,75 @@ def d_bash_bulk(fleet, mach):
 
 
 def d_output_verbosity(fleet, mach):
-    """Output is billed at 5x input, so it punches far above its token count."""
+    """Output is billed at 5x input AND re-read by every later turn.
+
+    It is the one component that is both billed at the highest multiplier and
+    amplified, and the detector priced only the first. The README's thesis is
+    that a token costs its size times the turns that re-read it; this was the
+    one detector pricing size alone, for the component where that omission
+    costs most.
+
+    The trap, which the report hit first and named: the re-read base is STORED
+    assistant content, not billed `output_tokens`. Most of what is billed as
+    output is reasoning that never enters a transcript and therefore is never
+    re-read -- 57.6% of it here. Using output_tokens as the base overstates the
+    re-read burden 2.4x on this machine and 2.8x on the reporting one, and the
+    resulting number looks entirely plausible.
+
+    So the two output detectors partition the bill rather than overlapping:
+    `reasoning-cost` owns the unstored part, billed once and never amplified;
+    this owns the stored part, billed once and re-read thereafter. The saving
+    is claimed on the stored part only, because that is what the lever reaches
+    -- being terser shortens what you write, not how much the model thinks.
+    """
     b = fleet.billed()
     cost = fleet.cost_units()
-    if not cost:
+    ct = fleet.content_total()
+    if not cost or not ct:
         return None
-    out_share = pct(b["output"] * 5.0, cost)
+    out_share = pct(b["output"] * PRICE["output"], cost)
     if out_share < 10:
         return None
+    bu = fleet.buckets()
+    stored = (bu.get("assistant text", 0) + bu.get("assistant thinking", 0)
+              + bu.get("tool call inputs", 0))
+    direct = pct(stored * PRICE["output"], cost)
+    # Through the shared conversion, like every other content share.
+    reread = to_spend(fleet, pct(stored, ct))
     turns = fleet.turns() or 1
-    per_turn = b["output"] / turns
     return Finding(
         id="output-verbosity",
-        title="Output tokens are a large share of spend",
+        title="Output is billed at 5x and then re-read every turn",
         severity="high" if out_share >= 20 else "medium",
         confidence="estimated",
-        assumption="a fifth off output length",
-        saving_pct=out_share * 0.20,
+        assumption="a fifth off output length; counts the 5x direct cost of "
+                   "STORED output plus its cache re-reads, and excludes "
+                   "unstored reasoning, which `reasoning-cost` owns",
+        saving_pct=(direct + reread) * 0.20,
         gate=Gate("any", [Cond("output share of cost-weighted spend",
                                out_share, 10, unit="%")]),
         evidence=[
             "{:,} output tokens = {:.1f}% of cost-weighted spend "
-            "(output is billed at 5x input)".format(b["output"], out_share),
-            "average {:,.0f} output tokens per turn".format(per_turn),
+            "(output is billed at {:.0f}x input)".format(
+                b["output"], out_share, PRICE["output"]),
+            "average {:,.0f} output tokens per turn".format(b["output"] / turns),
+            "of that, {:,} tokens are STORED in the transcript and re-read by "
+            "every later turn in the session; the rest is reasoning that is "
+            "never stored and never re-read".format(stored),
+            "stored output costs {:.1f}% of spend directly and a further "
+            "{:.1f}% in re-reads — {:.2f}x the direct cost".format(
+                direct, reread, (reread / direct) if direct else 0.0),
+            "assistant-authored content is {:.0f}% of everything in context "
+            "here".format(pct(stored, ct)),
+            "not modelled: a `/compact` drops earlier output out of context, "
+            "so on a compacted session the re-read half is lower than this",
         ],
         actions=[
             "Add a terseness instruction to CLAUDE.md — `ts fixes apply "
             "terse-output` writes one (with a backup, and a revert).",
             "Ask for diffs rather than whole rewritten files.",
+            "This and `reasoning-cost` split the output bill between them "
+            "rather than overlapping, so they may be added.",
         ],
         fix="terse-output")
 
