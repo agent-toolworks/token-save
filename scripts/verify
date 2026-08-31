@@ -542,7 +542,13 @@ fi
 # transcript_dir() honours. It was one of the four commands that died.
 ran=""
 for cmd in audit advise doctor share; do
-  TS_TRANSCRIPT_DIR="$TMP/hostile" bounded 60 "$TS" "$cmd" \
+  # `share` writes ./ts-profile.json by default, so without --out a verify run
+  # dirties the working tree -- and a `git add -A` then commits a profile of
+  # whoever ran the tests. It did exactly that here.
+  out=""
+  [[ $cmd == share ]] && out="--out $TMP/hostile-profile.json"
+  # shellcheck disable=SC2086
+  TS_TRANSCRIPT_DIR="$TMP/hostile" bounded 60 "$TS" "$cmd" $out \
       >/dev/null 2>"$TMP/hostile.$cmd.err" || ran="$ran $cmd(exit)"
   grep -qi traceback "$TMP/hostile.$cmd.err" && ran="$ran $cmd(traceback)"
 done

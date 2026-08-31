@@ -14,3 +14,7 @@ fixtures/thinking/
 fixtures/attachments/
 fixtures/images/
 fixtures/rereads/
+
+# `ts share` writes here by default. It is a generated profile of the
+# machine that ran it, not a repository artifact.
+ts-profile.json
