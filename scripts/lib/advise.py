@@ -28,6 +28,14 @@ Adding a detector: write a function taking (fleet, mach) and returning a
 Finding or None, then list it in DETECTORS. Keep the thresholds visible in the
 function rather than in a config file — a reader should be able to see why it
 fired without going somewhere else.
+
+Every detector that can fire must also declare its `gate`: the conditions it
+required, the literals it compared against, and how they combine. That is what
+lets the report say "fires at 3.2x its threshold" rather than presenting a
+machine sitting just over the line and one sitting far past it identically.
+`verify` asserts that anything which fired has a margin of at least 1, so a
+gate that drifts from the `if` above it fails the build rather than quietly
+reporting a number nobody can check.
 """
 from __future__ import annotations
 
@@ -56,6 +64,84 @@ def to_spend(fleet, share_pct: float) -> float:
     return share_pct * (read_cost / cost)
 
 
+def _fmt(v, unit: str) -> str:
+    if unit == "%":
+        return "%.1f%%" % v
+    if unit:
+        return "{:,.0f} {}".format(v, unit)
+    return "{:,.0f}".format(v)
+
+
+@dataclass
+class Cond:
+    """One thing a detector required, with the literal it was compared against.
+
+    A detector's gate is the most opinionated thing in it and was, until now,
+    the least visible: an `if` returning None. Fire and no-fire were reported
+    identically whether the machine sat at 1.05x the threshold or 3.2x it, so
+    a reader could not tell "you are unusual here" from "everybody trips this".
+    Both are useful; they are not the same fact.
+    """
+    name: str
+    value: float
+    bound: float                # None for a condition with no scale
+    mode: str = "at_least"      # at_least | at_most | flag
+    unit: str = ""
+
+    @property
+    def ratio(self):
+        """How far past its own bound this machine sits, as a multiple.
+
+        None when the condition has no scale to be past -- a boolean is either
+        true or it is not, and reporting "1.0x" for one would invent a
+        precision that is not there.
+        """
+        if self.bound is None or self.mode == "flag":
+            return None
+        if self.mode == "at_most":
+            return (self.bound / self.value) if self.value else None
+        return (self.value / self.bound) if self.bound else None
+
+    def describe(self) -> str:
+        if self.mode == "flag":
+            return "%s: %s" % (self.name, "yes" if self.value else "no")
+        r = self.ratio
+        return "%s  %s %s %s%s" % (
+            self.name, _fmt(self.value, self.unit),
+            "<=" if self.mode == "at_most" else ">=", _fmt(self.bound, self.unit),
+            "" if r is None else "  (%.1fx)" % r)
+
+
+@dataclass
+class Gate:
+    """The conditions that let a detector fire, and how they combine."""
+    mode: str                   # "any" -- one suffices; "all" -- every one
+    conditions: list = field(default_factory=list)
+
+    @property
+    def margin(self):
+        """Distance from the edge of the firing region.
+
+        For an ANY gate the machine would have to fall below EVERY condition to
+        go quiet, so the distance is set by the one it is furthest past. For an
+        ALL gate losing any single condition silences it, so the distance is
+        set by the one it is closest to losing. Taking max/min the other way
+        round would report a margin the detector does not actually have.
+        """
+        rs = [c.ratio for c in self.conditions if c.ratio is not None]
+        if not rs:
+            return None
+        return max(rs) if self.mode == "any" else min(rs)
+
+    @property
+    def binding(self):
+        """The condition the margin came from."""
+        scaled = [c for c in self.conditions if c.ratio is not None]
+        if not scaled:
+            return None
+        return (max if self.mode == "any" else min)(scaled, key=lambda c: c.ratio)
+
+
 @dataclass
 class Finding:
     id: str
@@ -70,6 +156,10 @@ class Finding:
     # next to the number. A projection with an unstated assumption is the
     # thing this tool exists to complain about, so it may not be omitted.
     assumption: str = ""
+    # The gate this machine cleared, and by how much. Every detector that can
+    # fire must declare one; verify asserts the declared gate agrees with the
+    # code path by checking that anything which fired has margin >= 1.
+    gate: Gate = None
 
     @property
     def rank(self) -> tuple:
@@ -110,6 +200,10 @@ def d_preamble(fleet, mach):
     share = pct(cost, reads)
     if share < 4 and med < 20000:
         return None
+    gate = Gate("any", [
+        Cond("preamble share of cache reads", share, 4, unit="%"),
+        Cond("median preamble size", med, 20000, unit="tokens"),
+    ])
     sev = "high" if share >= 12 or med >= 35000 else "medium" if share >= 6 else "low"
 
     ev = ["fixed preamble is {:,} tokens (median across {} sessions)".format(med, len(floors)),
@@ -133,6 +227,7 @@ def d_preamble(fleet, mach):
         severity=sev, confidence="estimated",
         assumption="a third of the preamble is removable",
         saving_pct=to_spend(fleet, share) * 0.33,
+        gate=gate,
         evidence=ev,
         actions=[
             "Audit the files above: `ts doctor --memory` lists them by size.",
@@ -155,6 +250,10 @@ def d_session_length(fleet, mach):
     med_p = quantile(peaks, 0.5)
     if med_t < 80 and med_p < 120000:
         return None
+    gate = Gate("any", [
+        Cond("median turns per session", med_t, 80),
+        Cond("median peak context", med_p, 120000, unit="tokens"),
+    ])
     sev = "high" if (p90_t >= 400 or med_p >= 250000) else "medium"
 
     growth = []
@@ -197,6 +296,7 @@ def d_session_length(fleet, mach):
         severity=sev, confidence="derived",
         assumption="each heavy session split once at its midpoint",
         saving_pct=derived_pct,
+        gate=gate,
         evidence=ev,
         actions=[
             "Clear between unrelated tasks. A fresh session restarts at the "
@@ -225,6 +325,11 @@ def d_bash_chatter(fleet, mach):
     share = pct(combined, fleet.content_total())
     if share < 15 or p90 > 5000:
         return None   # d_bash_bulk owns the fat-output case
+    gate = Gate("all", [
+        Cond("Bash text share of content", share, 15, unit="%"),
+        Cond("Bash output p90, under the bulk cutoff", p90, 5000,
+             mode="at_most", unit="tokens"),
+    ])
 
     # How much of the command text is pure ceremony: cd prefixes and absolute
     # path repetition. Measured, not assumed.
@@ -254,6 +359,7 @@ def d_bash_chatter(fleet, mach):
         confidence="estimated",
         assumption="a quarter of Bash calls batchable, 30% off those",
         saving_pct=to_spend(fleet, share) * 0.25 * 0.30,
+        gate=gate,
         evidence=ev,
         actions=[
             "Batch related commands into one call (`a && b && c`) — it halves "
@@ -303,6 +409,7 @@ def d_bash_bulk(fleet, mach):
         confidence="estimated",
         assumption="half the output compressible, 30% off it",
         saving_pct=to_spend(fleet, share) * 0.5 * 0.30,
+        gate=Gate("any", [Cond("Bash output p90", p90, 5000, unit="tokens")]),
         evidence=ev,
         actions=[
             "Install rtk (github.com/rtk-ai/rtk): a PreToolUse hook that "
@@ -334,6 +441,8 @@ def d_output_verbosity(fleet, mach):
         confidence="estimated",
         assumption="a fifth off output length",
         saving_pct=out_share * 0.20,
+        gate=Gate("any", [Cond("output share of cost-weighted spend",
+                               out_share, 10, unit="%")]),
         evidence=[
             "{:,} output tokens = {:.1f}% of cost-weighted spend "
             "(output is billed at 5x input)".format(b["output"], out_share),
@@ -365,8 +474,13 @@ def d_mcp_schema(fleet, mach):
     # Tool search is on by default in current Claude Code, but a custom base
     # URL turns it off, which is exactly the case a proxy user lands in.
     at_risk = bool(base_url) and tool_search in (None, "", "false", "0", "off")
-    if not at_risk and total <= 3:
+    if not at_risk and total < 4:
         return None
+    gate = Gate("any", [
+        Cond("tool deferral off behind a custom base URL", at_risk, None,
+             mode="flag"),
+        Cond("MCP servers configured or called", total, 4),
+    ])
     ev = ["{} MCP server(s) configured ({} global, {} project-scoped); "
           "{} actually called".format(
               n_global + n_proj, n_global, n_proj, len(called))]
@@ -389,6 +503,7 @@ def d_mcp_schema(fleet, mach):
         severity="high" if at_risk else "low",
         confidence="heuristic",
         saving_pct=6.0 if at_risk else 1.0,
+        gate=gate,
         evidence=ev,
         actions=([
             "Set ENABLE_TOOL_SEARCH=true — `ts fixes apply tool-search` writes "
@@ -422,6 +537,8 @@ def d_repeat_reads(fleet, mach):
         severity="medium" if share >= 3 else "low",
         confidence="estimated",
         saving_pct=to_spend(fleet, share),
+        gate=Gate("any", [Cond("redundant re-read share of content",
+                               share, 1, unit="%")]),
         evidence=ev,
         actions=[
             "Read once with a wider range instead of several narrow ranges.",
@@ -447,6 +564,10 @@ def d_images(fleet, mach):
         severity="low",
         confidence="estimated",
         saving_pct=to_spend(fleet, share) * 0.5,
+        gate=Gate("all", [
+            Cond("images captured", n, 10),
+            Cond("image share of content", share, 2, unit="%"),
+        ]),
         evidence=[
             "{} images totalling ~{:,} tokens ({:.1f}% of content)".format(
                 n, img, share),
@@ -472,6 +593,7 @@ def d_thinking(fleet, mach):
         title="Extended thinking is a large share of content",
         severity="low", confidence="estimated",
         saving_pct=to_spend(fleet, share),
+        gate=Gate("any", [Cond("thinking share of content", share, 8, unit="%")]),
         evidence=["thinking blocks are ~{:,} tokens ({:.1f}% of content)".format(
             th, share)],
         actions=[
@@ -493,6 +615,7 @@ def d_attachments(fleet, mach):
         title="File injections are a large share of content",
         severity="low", confidence="estimated",
         saving_pct=to_spend(fleet, share),
+        gate=Gate("any", [Cond("attachment share of content", share, 8, unit="%")]),
         evidence=["attachments/injections ~{:,} tokens ({:.1f}% of content)".format(
             at, share),
             "these are files pulled in automatically (@-mentions, IDE "
@@ -568,6 +691,8 @@ def d_subagent_cost(fleet, mach):
         title="Subagent traffic is a large share of spend",
         severity="medium", confidence="derived",
         saving_pct=0.0,
+        gate=Gate("any", [Cond("subagent share of cost-weighted spend",
+                               share, 5, unit="%")]),
         evidence=ev,
         actions=actions)
 

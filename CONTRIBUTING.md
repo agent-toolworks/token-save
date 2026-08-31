@@ -46,7 +46,10 @@ before proposing one.
    labels in `advise.py`.
 3. **Silence is a valid result.** A detector that fires on every machine is
    decoration. `bash-chatter` and `bash-bulk` are the model: mutually
-   exclusive, and one of them tells you *not* to install something.
+   exclusive, and one of them tells you *not* to install something. Where a
+   detector is genuinely universal because the thing it measures is universal,
+   report the margin and let the reader see that — do not raise the threshold
+   until it goes quiet, which suppresses a true finding to flatter a rule.
 4. **Degrade, never crash.** A malformed transcript, an unreadable config, a
    missing tool: report and continue. `scripts/verify` checks this.
 
@@ -66,6 +69,9 @@ def d_my_thing(fleet, mach):
         severity="medium",          # overwritten by severity_for(); see below
         confidence="measured",      # measured | estimated | heuristic
         saving_pct=to_spend(fleet, share_of_content),
+        gate=Gate("any", [          # what had to be true, and by how much
+            Cond("share of content", share_of_content, 8, unit="%"),
+        ]),
         evidence=[...],             # the numbers that made it fire
         actions=[...],              # what a human should do
         fix=None,                   # id in fixes.py, if scriptable
@@ -85,6 +91,18 @@ Notes:
   severity that disagrees with the number beside it.
 - Keep thresholds as literals in the function body. A reader should see why it
   fired without opening a config file.
+- Declare the same thresholds in a `gate`. Firing is not one bit of
+  information: a machine sitting at 1.05x a threshold and one sitting at 3.7x
+  are different facts, and until the gate was reported they were printed
+  identically. `Gate("any", ...)` fires when one condition holds and takes the
+  margin from the one you are furthest past; `Gate("all", ...)` needs every
+  condition and takes it from the one you are closest to losing. Use
+  `mode="at_most"` for a ceiling and `mode="flag"` for a boolean, which has no
+  margin and must not pretend to one.
+- `verify` fails if something fires with no gate, or with a margin below 1.
+  That check cannot see a bound inflated past what the fixtures reach — see
+  the note beside it — so the literal in the `Cond` must be the literal in the
+  `if`, not an approximation of it.
 
 ## Adding a fix
 

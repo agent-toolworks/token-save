@@ -389,6 +389,7 @@ head_ "5. DETECTOR COVERAGE  (every detector has something that fires it)"
 # fire. That is only fair if the existing ones are held to the same bar, so
 # this fails when a detector in CATALOGUE has no profile covering it.
 "$FIX/build-detector-fixtures" --out "$TMP" >/dev/null 2>&1 || true
+declare -a FLEETS=(verbose thinking attachments images rereads subagents chatter bulk)
 declare -a covered=()
 for prof in verbose:output-verbosity thinking:thinking attachments:attachments \
             images:images rereads:repeat-reads subagents:subagent-cost; do
@@ -512,6 +513,103 @@ counted=$("$TS" audit --root "$TMP/limit" --limit 2 --json 2>/dev/null | python3
 [[ $counted == "2 5" ]] \
   && ok "audit --json splits sessions from subagent_transcripts" \
   || bad "audit --json session counts wrong" "got '$counted', expected '2 5'"
+# A gate is a CLAIM about why a detector fired, and a claim in a comment drifts
+# from the code under it. Here it is checked: anything that fired must declare
+# a gate and must sit at or past it. A margin below 1 means the declared
+# thresholds and the `if` disagree, and the reported "fires at N.Nx" is fiction.
+#
+# What this does NOT catch, said plainly rather than left to be assumed: a
+# bound inflated to a value the fixture still clears. The detector fixtures are
+# deliberately extreme -- the attachments fleet is 99% attachments against an
+# 8% bound -- so raising that literal to 25% in the Cond alone still leaves a
+# margin of 4x and passes here. Catching that needs a fixture sitting NEAR each
+# threshold, which is a different fixture design than "smallest thing that
+# trips it". Missing, crashed and violated gates are covered; drift within the
+# fixture's headroom is not.
+gates=$(python3 - "$TMP" "$ROOT" "${FLEETS[@]}" <<'GATE'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[2], "scripts", "lib"))
+import advise, machine
+from transcripts import Fleet
+
+tmp, roots = sys.argv[1], sys.argv[3:]
+mach = machine.collect()
+bad = []
+seen = 0
+for name in roots:
+    root = os.path.join(tmp, name)
+    if not os.path.isdir(root):
+        continue
+    for f in advise.run(Fleet.load(root=root), mach):
+        seen += 1
+        if f.gate is None:
+            bad.append("%s/%s: fired with no gate declared" % (name, f.id))
+            continue
+        m = f.gate.margin
+        if m is None:
+            if not any(c.mode == "flag" for c in f.gate.conditions):
+                bad.append("%s/%s: gate has no measurable condition" % (name, f.id))
+            continue
+        if m < 0.999:
+            bad.append("%s/%s: fired at %.3fx its own gate -- the declared "
+                       "thresholds disagree with the code" % (name, f.id, m))
+        # Only an ALL gate requires every condition to hold. An ANY gate is
+        # cleared by one, and its others are legitimately below bound --
+        # `preamble` fires on share alone while the machine's preamble sits
+        # under the size threshold, which is the design, not a defect.
+        if f.gate.mode == "all":
+            for c in f.gate.conditions:
+                if c.mode == "at_least" and c.bound and c.value < c.bound * 0.999:
+                    bad.append("%s/%s: ALL gate condition %r is %s, below its "
+                               "bound %s" % (name, f.id, c.name, c.value, c.bound))
+                if c.mode == "at_most" and c.bound and c.value > c.bound * 1.001:
+                    bad.append("%s/%s: ALL gate condition %r is %s, above its "
+                               "bound %s" % (name, f.id, c.name, c.value, c.bound))
+        elif f.gate.margin is not None and f.gate.margin < 0.999:
+            bad.append("%s/%s: no condition of its ANY gate is satisfied"
+                       % (name, f.id))
+if not seen:
+    bad.append("no findings were produced at all -- the check proved nothing")
+# An all-clear must be SAID. An empty stdout is what a traceback looks like,
+# and reading that as "no problems" is how a broken check passes forever.
+print("|".join(bad) if bad else "CLEAR %d findings" % seen)
+GATE
+)
+if [[ $gates == CLEAR* ]]; then
+  ok "every fired finding declares a gate and sits at or past it ${DIM}(${gates#CLEAR })${OFF}"
+else
+  bad "a declared gate disagrees with its detector" \
+      "${gates//|/$'\n        '}"
+fi
+
+# An ANY gate is cleared by its best condition, an ALL gate held up by its
+# worst. Getting that backwards would report a margin the detector has not got,
+# and would do it silently, so both directions are pinned on known values.
+mg=$(python3 - "$ROOT" <<'MG'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "lib"))
+from advise import Cond, Gate
+bad = []
+lo = Cond("lo", 12.0, 10.0)                       # 1.2x
+hi = Cond("hi", 30.0, 10.0)                       # 3.0x
+if abs(Gate("any", [lo, hi]).margin - 3.0) > 1e-9:
+    bad.append("ANY gate should take the condition it is furthest past (3.0x)")
+if abs(Gate("all", [lo, hi]).margin - 1.2) > 1e-9:
+    bad.append("ALL gate should take the condition it is closest to losing (1.2x)")
+if Gate("any", [lo, hi]).binding is not hi or Gate("all", [lo, hi]).binding is not lo:
+    bad.append("binding condition does not match the margin it produced")
+inv = Cond("under a ceiling", 2500.0, 5000.0, mode="at_most")
+if abs(inv.ratio - 2.0) > 1e-9:
+    bad.append("an at_most condition at half its ceiling should read 2.0x")
+flag = Cond("a boolean", True, None, mode="flag")
+if flag.ratio is not None or Gate("any", [flag]).margin is not None:
+    bad.append("a boolean condition must not invent a ratio")
+print("|".join(bad) if bad else "CLEAR")
+MG
+)
+[[ $mg == CLEAR ]] && ok "gate margin: ANY takes the max, ALL the min, flags abstain" \
+                   || bad "margin arithmetic wrong" \
+                          "${mg//|/$'\n        '}"
 
 # chatter/bulk cover the two Bash detectors and both cover preamble and
 # session-length, which every long fixture trips.

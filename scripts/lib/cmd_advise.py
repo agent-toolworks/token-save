@@ -38,9 +38,18 @@ def _render(findings, fleet, show_all: bool) -> None:
         print(head)
         meta = "        %s   worth ~%.1f%% of spend" % (
             R.confidence(f.confidence), f.saving_pct)
+        margin = f.gate.margin if f.gate else None
+        if margin is not None:
+            meta += R.dim("   fires at %.1fx its threshold" % margin)
         print(meta)
         if f.assumption:
             print("        " + R.dim("assuming: " + f.assumption))
+        # The gate is the most opinionated part of a detector. Showing what it
+        # required, and by how much this machine cleared it, is what separates
+        # "you are unusual here" from "everybody trips this".
+        if f.gate:
+            for c in f.gate.conditions:
+                print("        " + R.dim("gate: " + c.describe()))
         print()
         for line in f.evidence:
             print("    " + R.dim("·") + " " + line)
@@ -106,7 +115,21 @@ def main(argv=None) -> int:
                 "id": f.id, "title": f.title, "severity": f.severity,
                 "confidence": f.confidence,
                 "saving_pct": round(f.saving_pct, 2),
-             "assumption": f.assumption,
+                "assumption": f.assumption,
+                "gate": None if not f.gate else {
+                    "mode": f.gate.mode,
+                    "margin": (None if f.gate.margin is None
+                               else round(f.gate.margin, 2)),
+                    "conditions": [{
+                        "name": c.name,
+                        "value": (c.value if isinstance(c.value, bool)
+                                  else round(float(c.value), 2)),
+                        "bound": c.bound,
+                        "mode": c.mode,
+                        "unit": c.unit,
+                        "ratio": None if c.ratio is None else round(c.ratio, 2),
+                    } for c in f.gate.conditions],
+                },
                 "evidence": f.evidence, "actions": f.actions, "fix": f.fix,
             } for f in findings],
             "silent": [k for k in advise.CATALOGUE
