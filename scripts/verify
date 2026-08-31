@@ -2096,6 +2096,91 @@ for label in empty garbage missing; do
   fi
 done
 
+
+# ---------------------------------------------------------------------------
+head_ "9. ARGUMENT VALIDATION  (a flag that cannot mean what was asked)"
+# ---------------------------------------------------------------------------
+# #23: --only got proper validation in #17 and its siblings did not, so three
+# flags accepted nonsense and returned a plausible-looking answer. The failure
+# mode is uniform and is why these are checks rather than a docs note: every
+# one of them produced a confident number, never an error.
+#
+#   --limit 0    `if limit:` is falsy at zero -> the limit was skipped and a
+#                request for zero sessions returned ALL of them
+#   --limit -5   mains[:-5] -> the COMPLEMENT of the request, i.e. every
+#                session except the 5 most recent, under a flag documented to
+#                mean the opposite
+#   --window 0   one size left in the window -> "+0 tokens/turn", which reads
+#                as "context is stable": reassuring, substantive and false
+for spec in "audit --limit 0" "audit --limit -5" "audit --limit abc" \
+            "advise --limit 0" "advise --limit -5" \
+            "now --window 0" "now --window -3"; do
+  # shellcheck disable=SC2086
+  set -- $spec
+  cmd=$1; shift
+  # `ts now` reads one session and takes no --root. Scoping it the same way as
+  # audit/advise made it exit 2 on the unrecognised flag, so the check passed
+  # without the window value ever being parsed -- green in both directions,
+  # which is the one result a check must never give.
+  if [[ $cmd == now ]]; then
+    scope=(--session "$sess")
+  else
+    scope=(--root "$TMP/bulk")
+  fi
+  if bounded 30 "$TS" "$cmd" "${scope[@]}" "$@" >/dev/null 2>"$TMP/argv.err"; then
+    bad "ts $spec was accepted; it must exit 2" "$(head -2 "$TMP/argv.err")"
+  else
+    rc=$?
+    if [[ $rc == 2 ]] && grep -q . "$TMP/argv.err"; then
+      ok "ts $spec rejected with exit 2 and a message"
+    else
+      bad "ts $spec exited $rc (want 2, with a message on stderr)" \
+          "$(head -2 "$TMP/argv.err")"
+    fi
+  fi
+done
+
+# The valid neighbours must keep working, or the guard is just a smaller bug.
+if bounded 30 "$TS" audit --root "$TMP/bulk" --limit 1 --json >"$TMP/lim1.json" 2>/dev/null \
+   && [[ $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sessions"])' "$TMP/lim1.json") == 1 ]]; then
+  ok "ts audit --limit 1 still returns exactly one session"
+else
+  bad "ts audit --limit 1 no longer returns one session"
+fi
+if bounded 30 "$TS" now --session "$sess" --window 1 --json >/dev/null 2>&1; then
+  ok "ts now --window 1 still runs (the degenerate but defensible window)"
+else
+  bad "ts now --window 1 was rejected; 1 is a legal window"
+fi
+
+# An empty filter used to mean "no filter at all": `scope = project or "*"`,
+# so a shell variable that expanded to nothing widened the run to the whole
+# fleet while the command line still read as scoped to one project.
+if bounded 30 "$TS" audit --root "$TMP/bulk" --project= >/dev/null 2>"$TMP/argv.err"; then
+  bad "ts audit --project= was accepted as 'no filter'"
+else
+  ok "ts audit --project= is an error, not a silent widening"
+fi
+
+# #20 made the empty-result message name the directory searched. One level in,
+# the same confusion survived: with a filter set, a correct root was named and
+# the filter was not, so a mistyped project looked identical to an empty root
+# -- and the advice pointed at TS_TRANSCRIPT_DIR, which was not the problem.
+"$TS" audit --root "$TMP/bulk" --project=zzz-not-a-project >/dev/null 2>"$TMP/proj.err" || true
+if grep -q 'zzz-not-a-project' "$TMP/proj.err" \
+   && grep -q 'proj-bulk' "$TMP/proj.err"; then
+  ok "an unmatched --project names the filter and lists projects that exist"
+else
+  bad "an unmatched --project did not name the filter or suggest real ones" \
+      "$(head -3 "$TMP/proj.err")"
+fi
+if grep -q 'TS_TRANSCRIPT_DIR' "$TMP/proj.err"; then
+  bad "an unmatched --project still advises checking TS_TRANSCRIPT_DIR" \
+      "$(head -3 "$TMP/proj.err")"
+else
+  ok "an unmatched --project does not blame the transcript root"
+fi
+
 # ---------------------------------------------------------------------------
 printf '\n%s\n' "$(printf '%.0s-' {1..70})"
 printf '  %s%d passed%s   %s%d failed%s   %d skipped\n' \

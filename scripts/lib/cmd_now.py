@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import report as R  # noqa: E402
 from transcripts import (PRICE, Session, find_sessions, human,  # noqa: E402
-                         parse, pct)
+                         parse, pct, positive_int)
 
 # Recent turns used for the growth rate. Short enough to react to a change of
 # activity, long enough that one big file read does not dominate.
@@ -225,7 +225,7 @@ def main(argv=None) -> int:
                                       "the one named on stdin)")
     ap.add_argument("--statusline", action="store_true",
                     help="one compact line; reads session JSON on stdin")
-    ap.add_argument("--window", type=int, default=DEFAULT_WINDOW,
+    ap.add_argument("--window", type=positive_int, default=DEFAULT_WINDOW,
                     help="turns used for the growth rate")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)

@@ -20,8 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import report as R  # noqa: E402
 from transcripts import (  # noqa: E402
-    PRICE, Fleet, command_program, human, pct, quantile, tokenizer_name,
-    transcript_dir,
+    PRICE, Fleet, command_program, human, pct, positive_int, project_filter,
+    quantile, tokenizer_name, transcript_dir, unmatched_project_note,
 )
 
 
@@ -273,8 +273,10 @@ def _as_json(fleet: Fleet) -> str:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="ts audit", description=__doc__)
-    ap.add_argument("--project", help="only this project directory (glob). Use the --project=NAME form: Claude Code project dirs begin with '-', which argparse reads as a flag")
-    ap.add_argument("--limit", type=int, help="only the N most recent sessions")
+    ap.add_argument("--project", type=project_filter,
+                    help="only this project directory (glob). Use the --project=NAME form: Claude Code project dirs begin with '-', which argparse reads as a flag")
+    ap.add_argument("--limit", type=positive_int,
+                    help="only the N most recent sessions")
     ap.add_argument("--sessions", action="store_true", help="per-session table")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--root", help="transcript root (default ~/.claude/projects)")
@@ -288,7 +290,15 @@ def main(argv=None) -> int:
         # that was already set and already honoured.
         where = args.root or transcript_dir()
         sys.stderr.write("no transcripts found under %s\n" % where)
-        if not args.root and not os.environ.get("TS_TRANSCRIPT_DIR"):
+        note = unmatched_project_note(where, args.project)
+        sys.stderr.write(note)
+        # When the filter is what missed, the root was right, and pointing at
+        # TS_TRANSCRIPT_DIR sends the reader to re-check a setting that is not
+        # the problem -- the same wrong-destination advice #20 removed, one
+        # level in.
+        if note:
+            pass
+        elif not args.root and not os.environ.get("TS_TRANSCRIPT_DIR"):
             sys.stderr.write(
                 "  set TS_TRANSCRIPT_DIR or pass --root if yours live "
                 "elsewhere\n")

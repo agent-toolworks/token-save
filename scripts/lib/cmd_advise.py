@@ -16,7 +16,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import advise  # noqa: E402
 import machine  # noqa: E402
 import report as R  # noqa: E402
-from transcripts import Fleet, tokenizer_name, transcript_dir  # noqa: E402
+from transcripts import (Fleet, positive_int, project_filter,  # noqa: E402
+                         tokenizer_name, transcript_dir,
+                         unmatched_project_note)
 
 
 def _render(findings, fleet, show_all: bool, blocked=(), only=None) -> None:
@@ -100,8 +102,10 @@ def _render(findings, fleet, show_all: bool, blocked=(), only=None) -> None:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="ts advise", description=__doc__)
-    ap.add_argument("--project", help="only this project directory (glob). Use the --project=NAME form: Claude Code project dirs begin with '-', which argparse reads as a flag")
-    ap.add_argument("--limit", type=int, help="only the N most recent sessions")
+    ap.add_argument("--project", type=project_filter,
+                    help="only this project directory (glob). Use the --project=NAME form: Claude Code project dirs begin with '-', which argparse reads as a flag")
+    ap.add_argument("--limit", type=positive_int,
+                    help="only the N most recent sessions")
     ap.add_argument("--root", help="transcript root")
     ap.add_argument("--all", action="store_true",
                     help="also list the detectors that stayed silent")
@@ -115,8 +119,9 @@ def main(argv=None) -> int:
         # Was: "`ts audit` explains where it looked" -- which sent the
         # reader to a message that named the wrong directory. Two hops, both
         # confident, wrong destination. Say it here instead.
-        sys.stderr.write("no usable transcripts found under %s\n"
-                         % (args.root or transcript_dir()))
+        where = args.root or transcript_dir()
+        sys.stderr.write("no usable transcripts found under %s\n" % where)
+        sys.stderr.write(unmatched_project_note(where, args.project))
         return 1
     mach = machine.collect()
 

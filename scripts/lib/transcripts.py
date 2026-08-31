@@ -58,6 +58,7 @@ transcript, so the sniffer is here rather than in a caller.
 """
 from __future__ import annotations
 
+import argparse
 import base64
 import glob
 import json
@@ -490,6 +491,88 @@ def limit_to_sessions(paths: list, root: str, limit: int) -> list:
                            if parent_session_of(p, root) in keep])
 
 
+
+def positive_int(raw: str) -> int:
+    """argparse ``type=`` for counts that are meaningless at zero or below.
+
+    ``--limit`` and ``--window`` took a bare ``int``, and every value the flag
+    cannot mean still produced a confident answer instead of an error:
+
+      ``--limit 0``   ``if limit:`` is falsy at zero, so the limit was skipped
+                      entirely and a request for zero sessions returned all of
+                      them.
+      ``--limit -5``  reached ``mains[:-5]`` and returned the COMPLEMENT of the
+                      request -- every session except the 5 most recent, under
+                      a flag whose documented meaning is the opposite. Nothing
+                      in the output looks wrong, which is what makes it the
+                      worst of these to debug.
+      ``--window 0``  left one size in the window and reported ``+0
+                      tokens/turn``, which reads as "context is stable" -- a
+                      substantive and reassuring claim, and the second time a
+                      spurious zero has arrived at that number after the
+                      median-of-deltas attempt.
+
+    Rejecting here puts the message in argparse's hands and exits 2, matching
+    ``--only``'s unknown-id error rather than inventing a third convention.
+    """
+    try:
+        n = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError("%r is not an integer" % raw)
+    if n < 1:
+        raise argparse.ArgumentTypeError(
+            "must be 1 or greater, not %d; drop the flag to leave it unset" % n)
+    return n
+
+
+def project_filter(raw: str) -> str:
+    """argparse ``type=`` for ``--project``: an empty filter is an error.
+
+    ``scope = project or "*"`` made ``--project=`` mean "no filter at all", so
+    a shell variable that expanded to nothing silently widened the run to the
+    whole fleet while the command line still read as scoped to one project.
+    """
+    if not raw.strip():
+        raise argparse.ArgumentTypeError(
+            "empty project filter; drop --project to search every project")
+    return raw
+
+
+def project_dirs(root: str = None) -> list:
+    """Project directories under ``root``, most recently written first."""
+    root = root or transcript_dir()
+    try:
+        names = [e for e in os.listdir(root)
+                 if os.path.isdir(os.path.join(root, e))]
+    except OSError:
+        return []
+    return sorted(names, key=lambda e: -_mtime(os.path.join(root, e)))
+
+
+def unmatched_project_note(root: str, project: str) -> str:
+    """Why an empty result is empty when a ``--project`` filter was in play.
+
+    #20 made the empty-result message name the directory actually searched.
+    One level in, the same confusion survived: with a filter set the message
+    named a correct root and said nothing about the filter, so a mistyped
+    project was indistinguishable from an empty transcript root. Returns "" if
+    the filter did match something, so the caller can print it unconditionally.
+
+    A user who mistyped a project usually cannot reconstruct the mangled form,
+    so name a few that do exist rather than only reporting the miss.
+    """
+    if not project or glob.glob(os.path.join(root, project)):
+        return ""
+    out = ["  --project=%s matched no project directory there\n" % project]
+    have = project_dirs(root)
+    if have:
+        shown = have[:5]
+        more = len(have) - len(shown)
+        out.append("  projects under that root include: %s%s\n"
+                   % (", ".join(shown), " (+%d more)" % more if more else ""))
+    return "".join(out)
+
+
 def _flush_usage(sess: "Session", usage: dict) -> None:
     """Apply one MESSAGE's usage to a session. See the note in parse()."""
     cr = usage.get("cache_read_input_tokens") or 0
@@ -740,7 +823,7 @@ class Fleet:
     def load(cls, root: str = None, project: str = None, limit: int = None) -> "Fleet":
         root = root or transcript_dir()
         paths = find_transcripts(root, project)
-        if limit:
+        if limit is not None:
             paths = limit_to_sessions(paths, root, limit)
         return cls(sessions=[parse(p, root=root) for p in paths])
 
