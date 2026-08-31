@@ -1068,6 +1068,87 @@ HELP
                        || bad "a detector bypasses the shared conversion" \
                               "${helper//|/$'\n        '}"
 
+# repeat-reads called its number "redundant copies" while counting two things
+# that are not copies: reads at DIFFERENT byte ranges of one file, because
+# offset/limit were dropped from the key, and reads in DIFFERENT sessions,
+# because they were pooled fleet-wide. 89% of the groups it fired on here had
+# every read at a distinct range. Both non-copy cases are asserted to produce
+# exactly ZERO, which is the arithmetic most likely to regress.
+rr=$(python3 - "$TMP" "$ROOT" <<'RR'
+import json, os, sys
+sys.path.insert(0, os.path.join(sys.argv[2], "scripts", "lib"))
+from transcripts import Fleet
+
+root = os.path.join(sys.argv[1], "rereads-exact")
+proj = os.path.join(root, "proj")
+os.makedirs(proj, exist_ok=True)
+BODY = "alpha beta gamma delta epsilon " * 400      # ~2k tokens a read
+
+
+def session(path, reads):
+    recs, n = [], 0
+    for fp, off, lim in reads:
+        n += 1
+        tid = "t%d" % n
+        inp = {"file_path": fp}
+        if off is not None:
+            inp["offset"] = off
+        if lim is not None:
+            inp["limit"] = lim
+        recs.append({"type": "assistant", "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": tid, "name": "Read",
+                         "input": inp}],
+            "usage": {"input_tokens": 0, "cache_creation_input_tokens": 0,
+                      "cache_read_input_tokens": 20000, "output_tokens": 50}}})
+        recs.append({"type": "user", "message": {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": tid,
+                         "content": BODY}]}})
+    with open(path, "w") as fh:
+        for r in recs:
+            fh.write(json.dumps(r) + "\n")
+
+
+# A: disjoint ranges of one file (NOT copies), plus one true duplicate.
+session(os.path.join(proj, "a.jsonl"), [
+    ("/w/disjoint.py", 1, 50), ("/w/disjoint.py", 400, 50),
+    ("/w/disjoint.py", 800, 50), ("/w/disjoint.py", 1200, 50),
+    ("/w/dup.py", None, None), ("/w/dup.py", None, None),
+])
+# B: the SAME range as A read again, but in another session (NOT a copy --
+#    this context has no prior copy of it and must read it).
+session(os.path.join(proj, "b.jsonl"), [
+    ("/w/disjoint.py", 1, 50), ("/w/dup.py", None, None),
+])
+
+f = Fleet.load(root=root)
+per = {}
+for s in f.sessions:
+    for (p, o, l), (c, t) in s.reads.items():
+        if c >= 2 and t > 0:
+            per[(p, o, l)] = per.get((p, o, l), 0) + (t - t // c)
+
+bad = []
+disjoint = sum(v for (p, _o, _l), v in per.items() if p == "/w/disjoint.py")
+dup = sum(v for (p, _o, _l), v in per.items() if p == "/w/dup.py")
+if disjoint != 0:
+    bad.append("four disjoint ranges of one file scored %d tokens of "
+               "redundancy; distinct ranges are not copies" % disjoint)
+if dup <= 0:
+    bad.append("a genuine same-range duplicate scored %d -- the detector now "
+               "misses what it is for" % dup)
+# The cross-session repeat of /w/disjoint.py at 1+50 must not combine with A's.
+key = ("/w/disjoint.py", 1, 50)
+if per.get(key):
+    bad.append("the same range read once in each of two sessions scored %d; "
+               "redundancy was pooled across sessions again" % per[key])
+print("|".join(bad) if bad else "CLEAR")
+RR
+)
+[[ $rr == CLEAR ]] && ok "repeat-reads: distinct ranges and separate sessions are not copies" \
+                   || bad "repeat-reads counts non-copies" "${rr//|/$'\n        '}"
+
 # chatter/bulk cover the two Bash detectors and both cover preamble and
 # session-length, which every long fixture trips.
 covered+=(bash-chatter bash-bulk preamble session-length)

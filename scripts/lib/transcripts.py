@@ -653,9 +653,19 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
                     if name == "Bash":
                         s.bash_out.append(text_n)
                     elif name in ("Read", "read"):
-                        fp = str((id2input.get(tuid) or {}).get("file_path", "?"))
-                        cur = s.reads.get(fp) or [0, 0]
-                        s.reads[fp] = [cur[0] + 1, cur[1] + text_n + img_n]
+                        # Keyed on the RANGE as well as the path. Dropping
+                        # offset/limit made lines 1-50 and lines 400-450 look
+                        # like two reads of the same thing, and everything
+                        # downstream then charged all but one of them as a
+                        # duplicate. 89% of the groups this fired on had every
+                        # read at a different range -- nothing duplicated.
+                        # None/None is the whole file, and is correctly a
+                        # different key from any ranged read of it.
+                        inp = id2input.get(tuid) or {}
+                        rkey = (str(inp.get("file_path", "?")),
+                                inp.get("offset"), inp.get("limit"))
+                        cur = s.reads.get(rkey) or [0, 0]
+                        s.reads[rkey] = [cur[0] + 1, cur[1] + text_n + img_n]
     if pending is not None:
         _flush_usage(s, pending[1])
     return s

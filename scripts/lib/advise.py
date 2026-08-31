@@ -702,34 +702,74 @@ def d_mcp_schema(fleet, mach):
 
 
 def d_repeat_reads(fleet, mach):
-    """Re-reading a file you already have in context pays twice for it."""
-    reads = fleet.merged("reads")
-    repeats = [(p, c, t) for p, (c, t) in reads.items() if c >= 4 and t > 3000]
-    if not repeats:
+    """The same bytes read twice into one context. Not the same FILE twice.
+
+    Two classification errors made this ~50x too large on the reporting
+    machine, while calling its result "redundant copies".
+
+    Reads were keyed on file_path with `offset` and `limit` dropped, so lines
+    1-50 and lines 400-450 counted as two reads of the same thing and all but
+    one were charged as duplicates. Measured here, 89% of the (session, file)
+    groups it fired on had EVERY read at a different range -- nothing was
+    duplicated at all. The detector's own first action already knew this
+    ("read once with a wider range instead of several narrow ranges"); the
+    measurement did not reflect it.
+
+    Redundancy was also pooled across the whole fleet. A file read in session A
+    and again in session B is not a duplicate: session B has no prior copy in
+    its context and must read it. That is what produced evidence lines like
+    34x for one file -- dozens of sessions each reading it once, correctly.
+
+    Redundancy only means anything inside one context window, so it is counted
+    inside one session and on identical ranges. Reading four narrow ranges
+    instead of one wide one does waste something -- per-call overhead, re-sent
+    headers -- but it is not `t - t//c` and it is not a copy, so it is not
+    claimed here. The cross-session pattern is real too, and its advice ("put
+    the stable part in memory") is good, but it has different arithmetic and
+    wants its own name; it is deliberately not folded in.
+    """
+    wasted = 0
+    worst = {}
+    for sess in fleet.sessions:
+        for (path, off, lim), (count, tok) in sess.reads.items():
+            if count < 2 or tok <= 0:
+                continue
+            dup = tok - (tok // count)
+            if not dup:
+                continue
+            wasted += dup
+            prev = worst.get((path, off, lim)) or [0, 0, 0]
+            worst[(path, off, lim)] = [prev[0] + dup, prev[1] + count - 1,
+                                       max(prev[2], count)]
+    if not wasted:
         return None
-    repeats.sort(key=lambda r: -r[2])
-    wasted = sum(t - (t // c) for _p, c, t in repeats)
     share = pct(wasted, fleet.content_total())
     if share < 1:
         return None
-    ev = ["{} file(s) read 4+ times; ~{:,} tokens are redundant copies".format(
-        len(repeats), wasted)]
-    for p, c, t in repeats[:5]:
-        ev.append("    {:>3}x  {:>7,} tok  {}".format(
-            c, t, p.replace(os.path.expanduser("~"), "~")))
+    ranked = sorted(worst.items(), key=lambda kv: -kv[1][0])
+    ev = ["{:,} tokens are re-reads of an IDENTICAL range inside a single "
+          "session ({:.1f}% of content)".format(wasted, share),
+          "counted within one session only, and only where the byte range "
+          "matches: a different range is not a copy, and another session has "
+          "no prior copy to duplicate"]
+    for (path, off, lim), (dup, extra, mx) in ranked[:5]:
+        rng = "whole file" if off is None and lim is None else "%s+%s" % (
+            off if off is not None else 0, lim if lim is not None else "eof")
+        ev.append("    {:>7,} tok  {:>3} extra read(s), worst session {}x  {} [{}]".format(
+            dup, extra, mx, path.replace(os.path.expanduser("~"), "~"), rng))
     return Finding(
         id="repeat-reads",
-        title="The same files are read many times per session",
+        title="The same range of the same file is read twice in one session",
         severity="medium" if share >= 3 else "low",
         confidence="estimated",
         saving_pct=to_spend(fleet, share),
-        gate=Gate("any", [Cond("redundant re-read share of content",
+        gate=Gate("any", [Cond("identical re-read share of content",
                                share, 1, unit="%")]),
         evidence=ev,
         actions=[
-            "Read once with a wider range instead of several narrow ranges.",
-            "For files re-read across sessions, put the stable part in memory "
-            "rather than re-reading it each time.",
+            "Read once with a wider range instead of the same range twice. "
+            "Reading DIFFERENT ranges is not counted here and is not the "
+            "problem this reports.",
         ])
 
 
