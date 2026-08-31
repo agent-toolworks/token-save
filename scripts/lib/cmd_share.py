@@ -30,7 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import advise as A  # noqa: E402
 import machine as M  # noqa: E402
 import report as R  # noqa: E402
-from transcripts import Fleet, quantile, tokenizer_name  # noqa: E402
+from transcripts import (Fleet, quantile, tokenizer_name,  # noqa: E402
+                         transcript_dir)
 
 # Bump on ANY change to a field name, a field type, or the MEANING of a value.
 # Schema 1 covered three mutually incompatible shapes across v0.6.0-v0.11.0:
@@ -203,7 +204,8 @@ def main(argv=None) -> int:
 
     fleet = Fleet.load(root=args.root)
     if not fleet.turns():
-        sys.stderr.write("no usable transcripts found\n")
+        sys.stderr.write("no usable transcripts found under %s\n"
+                         % (args.root or transcript_dir()))
         return 1
     profile = build(fleet, M.collect())
     text = json.dumps(profile, indent=1, sort_keys=True)

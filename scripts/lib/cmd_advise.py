@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import advise  # noqa: E402
 import machine  # noqa: E402
 import report as R  # noqa: E402
-from transcripts import Fleet, tokenizer_name  # noqa: E402
+from transcripts import Fleet, tokenizer_name, transcript_dir  # noqa: E402
 
 
 def _render(findings, fleet, show_all: bool, blocked=(), only=None) -> None:
@@ -112,8 +112,11 @@ def main(argv=None) -> int:
 
     fleet = Fleet.load(root=args.root, project=args.project, limit=args.limit)
     if not fleet.turns():
-        sys.stderr.write(
-            "no usable transcripts found — `ts audit` explains where it looked\n")
+        # Was: "`ts audit` explains where it looked" -- which sent the
+        # reader to a message that named the wrong directory. Two hops, both
+        # confident, wrong destination. Say it here instead.
+        sys.stderr.write("no usable transcripts found under %s\n"
+                         % (args.root or transcript_dir()))
         return 1
     mach = machine.collect()
 

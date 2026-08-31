@@ -806,6 +806,62 @@ RO
 [[ $ro == CLEAR ]] && ok "a read-only target fails cleanly and leaves no orphan backup" \
                    || bad "read-only handling wrong" "${ro//|/$'\n        '}"
 
+# TS_TRANSCRIPT_DIR was honoured for SEARCHING and ignored for REPORTING, so
+# the one message whose entire job is to say where we looked named somewhere we
+# did not -- and then advised setting the variable that was already set and
+# already used. `advise` delegated its explanation to that message, so a reader
+# following it took two confident hops to the wrong destination, and `doctor`
+# derived the path from CLAUDE_HOME, which is a different variable entirely.
+tdir=$(python3 - "$TMP" "$ROOT" <<'TDIR'
+import os, re, subprocess, sys
+
+tmp, root = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+empty = os.path.join(tmp, "tdir-empty", "projects")
+os.makedirs(empty, exist_ok=True)
+bad = []
+
+env = dict(os.environ)
+env["TS_TRANSCRIPT_DIR"] = empty
+# CLAUDE_CONFIG_DIR points somewhere else entirely, so a command deriving the
+# transcript root from it names the wrong path and this catches it.
+env["CLAUDE_CONFIG_DIR"] = os.path.join(tmp, "tdir-cfg")
+os.makedirs(env["CLAUDE_CONFIG_DIR"], exist_ok=True)
+
+for cmd in ("audit", "advise", "share"):
+    r = subprocess.run([ts, cmd], env=env, capture_output=True, text=True)
+    out = (r.stdout or "") + (r.stderr or "")
+    if empty not in out:
+        bad.append("%s does not name TS_TRANSCRIPT_DIR when it finds nothing: "
+                   "%r" % (cmd, out.strip()[:100]))
+    if os.path.expanduser("~/.claude/projects") in out:
+        bad.append("%s names the default path although TS_TRANSCRIPT_DIR is set"
+                   % cmd)
+    if "explains where it looked" in out:
+        bad.append("%s still delegates its explanation to another message" % cmd)
+    if re.search(r"set TS_TRANSCRIPT_DIR", out):
+        bad.append("%s advises setting TS_TRANSCRIPT_DIR, which is already set"
+                   % cmd)
+
+r = subprocess.run([ts, "doctor"], env=env, capture_output=True, text=True)
+line = [l for l in (r.stdout or "").splitlines() if "transcripts" in l.lower()]
+if not any(empty in l for l in line):
+    bad.append("doctor reports the wrong transcript root: %r" % line[:1])
+
+# With the variable UNSET, the advice to set it is the useful thing to print.
+env2 = dict(os.environ)
+env2.pop("TS_TRANSCRIPT_DIR", None)
+env2["CLAUDE_CONFIG_DIR"] = env["CLAUDE_CONFIG_DIR"]
+r = subprocess.run([ts, "audit", "--root", os.path.join(tmp, "nope-empty")],
+                   env=env2, capture_output=True, text=True)
+if os.path.join(tmp, "nope-empty") not in (r.stdout or "") + (r.stderr or ""):
+    bad.append("--root is not named back when it finds nothing")
+print("|".join(bad) if bad else "CLEAR")
+TDIR
+)
+[[ $tdir == CLEAR ]] && ok "TS_TRANSCRIPT_DIR is reported, not just searched" \
+                     || bad "transcript root misreported" "${tdir//|/$'\n        '}"
+
 # A corrupt settings.json must be refused, not overwritten. This is the one
 # failure mode that would destroy user configuration.
 printf '{ this is not json' > "$CLAUDE_CONFIG_DIR/settings.json"

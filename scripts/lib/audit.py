@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import report as R  # noqa: E402
 from transcripts import (  # noqa: E402
     PRICE, Fleet, command_program, human, pct, quantile, tokenizer_name,
+    transcript_dir,
 )
 
 
@@ -281,10 +282,19 @@ def main(argv=None) -> int:
 
     fleet = Fleet.load(root=args.root, project=args.project, limit=args.limit)
     if not fleet.sessions:
-        sys.stderr.write(
-            "no transcripts found under %s\n"
-            "  set TS_TRANSCRIPT_DIR or pass --root if yours live elsewhere\n"
-            % (args.root or os.path.expanduser("~/.claude/projects")))
+        # transcript_dir() resolves TS_TRANSCRIPT_DIR; re-deriving the default
+        # here meant the one message whose entire job is to say where we looked
+        # named somewhere we did not look, and then advised setting the variable
+        # that was already set and already honoured.
+        where = args.root or transcript_dir()
+        sys.stderr.write("no transcripts found under %s\n" % where)
+        if not args.root and not os.environ.get("TS_TRANSCRIPT_DIR"):
+            sys.stderr.write(
+                "  set TS_TRANSCRIPT_DIR or pass --root if yours live "
+                "elsewhere\n")
+        elif not args.root:
+            sys.stderr.write(
+                "  that is TS_TRANSCRIPT_DIR, which is set and was used\n")
         return 1
     if not fleet.turns():
         sys.stderr.write(

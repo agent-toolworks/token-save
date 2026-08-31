@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import machine  # noqa: E402
 import report as R  # noqa: E402
-from transcripts import Fleet, find_transcripts, quantile, tokenizer_name  # noqa: E402
+from transcripts import (Fleet, find_transcripts, quantile,  # noqa: E402
+                         tokenizer_name, transcript_dir)
 
 HOME = os.path.expanduser("~")
 
@@ -33,7 +34,11 @@ def _environment() -> str:
     out.append(R.kv("tokenizer", tokenizer_name(),
                     "" if "tiktoken" in tokenizer_name()
                     else "pip install tiktoken for exact counts"))
-    out.append(R.kv("transcripts", _short(machine.CLAUDE_HOME + "/projects")))
+    # Not CLAUDE_HOME + "/projects": the transcript root is TS_TRANSCRIPT_DIR,
+    # which moves independently of CLAUDE_CONFIG_DIR. `doctor` exists to say
+    # which paths are in effect, so naming one that is not is the worst place
+    # for this mistake.
+    out.append(R.kv("transcripts", _short(transcript_dir())))
     n = len(find_transcripts())
     out.append(R.kv("transcripts found", "{:,}".format(n),
                     "" if n else "nothing to audit — set TS_TRANSCRIPT_DIR"))
