@@ -37,9 +37,11 @@ def _render(findings, fleet, show_all: bool, blocked=(), only=None) -> None:
                                "see `ts advise --all` for the full catalogue"))
         return
 
-    top = max(f.saving_pct for f in findings)
+    claimed = [f.saving_pct for f in findings if f.saving_pct is not None]
+    head_note = ("   largest single item: ~%.0f%% of spend" % max(claimed)
+                 if claimed else "   no saving claimed by any finding")
     print("\n  " + R.bold("%d of %d detectors fired" % (len(findings), len(advise.DETECTORS)))
-          + R.dim("   largest single item: ~%.0f%% of spend" % top))
+          + R.dim(head_note))
     excluded = [f for f in findings if f.id in advise.UNION_EXCLUDED]
     union, groups = advise.union_lower_bound(findings)
 
@@ -102,8 +104,15 @@ def _render(findings, fleet, show_all: bool, blocked=(), only=None) -> None:
         head = "  %s  %s  %s" % (R.severity(f.severity), R.bold(f.title),
                                  R.dim("[" + f.id + "]"))
         print(head)
-        meta = "        %s   worth ~%.1f%% of spend" % (
-            R.confidence(f.confidence), f.saving_pct)
+        if f.saving_pct is not None:
+            meta = "        %s   worth ~%.1f%% of spend" % (
+                R.confidence(f.confidence), f.saving_pct)
+        elif f.locates_pct:
+            # The number shown is the number that ranked it.
+            meta = "        %s   locates ~%.1f%% of spend; no saving claimed" % (
+                R.confidence(f.confidence), f.locates_pct)
+        else:
+            meta = "        %s   no saving claimed" % R.confidence(f.confidence)
         margin = f.gate.margin if f.gate else None
         if margin is not None:
             meta += R.dim("   fires at %.1fx its threshold" % margin)
@@ -231,7 +240,10 @@ def main(argv=None) -> int:
             "findings": [{
                 "id": f.id, "title": f.title, "severity": f.severity,
                 "confidence": f.confidence,
-                "saving_pct": round(f.saving_pct, 2),
+                "saving_pct": (None if f.saving_pct is None
+                               else round(f.saving_pct, 2)),
+                "locates_pct": (None if f.locates_pct is None
+                                else round(f.locates_pct, 2)),
                 "assumption": f.assumption,
                 "attribution": None if not f.attribution else {
                     "total": f.attribution["total"],

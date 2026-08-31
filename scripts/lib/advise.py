@@ -166,7 +166,14 @@ class Finding:
     title: str
     severity: str            # high | medium | low
     confidence: str          # measured | estimated | heuristic
-    saving_pct: float        # share of measured spend, 0 when unquantifiable
+    # Share of measured spend. None means "fires, cost located, no saving
+    # CLAIMED" -- which is not 0.0, and not Unevaluated either: Unevaluated
+    # means the detector could not check, and these checked fine and declined
+    # to invent a number. 0.0 was standing in for all three, and four
+    # consumers read it as a measured zero: severity, rank, the header's
+    # `largest single item`, and union_lower_bound_pct -- the last being the
+    # exact value #28 established must not carry that meaning.
+    saving_pct: float
     evidence: list = field(default_factory=list)
     actions: list = field(default_factory=list)
     fix: str = None          # id understood by fixes.py, when auto-appliable
@@ -183,10 +190,29 @@ class Finding:
     # partial itemisation read as a complete one is the failure #2 describes,
     # so the residual is part of the structure rather than a rendering detail.
     attribution: dict = None
+    # What share of spend the finding is ABOUT, when it claims no saving. Set
+    # only where that share is material: subagent-cost locates 27.9% here,
+    # while mcp-schema's unused-server branch says in its own evidence that
+    # the cost is small, so it leaves this unset and stays low.
+    locates_pct: float = None
+
+    @property
+    def ranked_pct(self) -> float:
+        """The number that determines this finding's position in the report.
+
+        A finding claiming no saving cannot be ordered by one, and ordering it
+        by 0.0 buried subagent-cost -- firing at 5.6x its gate on 27.9% of
+        spend -- below a 1.3% finding. It is ordered by what it locates
+        instead, and the renderer shows that same number, so the figure a
+        reader sees is the figure that placed it.
+        """
+        if self.saving_pct is not None:
+            return self.saving_pct
+        return self.locates_pct or 0.0
 
     @property
     def rank(self) -> tuple:
-        return (-self.saving_pct, self.id)
+        return (-self.ranked_pct, self.id)
 
 
 # How findings relate to one another, declared ONCE per unordered pair.
@@ -287,7 +313,8 @@ def union_lower_bound(findings) -> tuple:
     worth 24%; that is the measured-zero versus not-computed distinction from
     #14, and the two may not share a representation.
     """
-    pool = [f for f in findings if f.id not in UNION_EXCLUDED]
+    pool = [f for f in findings
+            if f.id not in UNION_EXCLUDED and f.saving_pct is not None]
     by_id = {f.id: f for f in pool}
     # Union-find over the relations that forbid addition. DISJOINT is not an
     # edge: those may be added, which is the whole point of declaring it.
@@ -940,7 +967,10 @@ def d_mcp_schema(fleet, mach):
         id="mcp-schema",
         title="Configured MCP servers you never call",
         severity="low", confidence="derived",
-        saving_pct=0.0,
+        # Deferral is on, so the evidence above says the cost of an unused
+        # server is small. No saving claimed, and nothing material located --
+        # this is hygiene, and belongs low.
+        saving_pct=None,
         gate=gate,
         evidence=ev,
         actions=[
@@ -1333,7 +1363,11 @@ def d_subagent_cost(fleet, mach):
         id="subagent-cost",
         title="Subagent traffic is a large share of spend",
         severity="medium", confidence="derived",
-        saving_pct=0.0,
+        # No saving is claimed: this detector's own first action says to
+        # delegate for context hygiene rather than as a saving, and measure
+        # both sides. It locates the cost without inventing a recovery.
+        saving_pct=None,
+        locates_pct=share,
         gate=Gate("any", [Cond("subagent share of cost-weighted spend",
                                share, 5, unit="%")]),
         evidence=ev,
@@ -1396,7 +1430,15 @@ def evaluate(fleet, mach):
             # Detectors set a severity for readability while being written;
             # the report only ever shows the one derived from the number, so
             # the two can never drift apart in front of a reader.
-            f.severity = severity_for(f.saving_pct)
+            #
+            # Except where there is no number: severity_for(0.0) is "low", so
+            # a detector that located 27.9% of spend and declined to claim a
+            # saving was relabelled LOW over its own "medium". The reasoning
+            # in severity_for holds when saving_pct estimates impact and
+            # inverts when it stands for "no estimate offered" -- the ranking
+            # then disagrees with the only number the finding does assert.
+            if f.saving_pct is not None:
+                f.severity = severity_for(f.saving_pct)
             found.append(f)
     found.sort(key=lambda f: f.rank)
     return found, blocked

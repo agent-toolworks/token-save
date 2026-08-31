@@ -976,6 +976,78 @@ UNI
 [[ $uni == CLEAR ]] && ok "the union is a floor: overlaps counted once, disjoint added, session-length out" \
                     || bad "union arithmetic is wrong" "${uni//|/$'\n        '}"
 
+# #30: saving_pct=0.0 stood for "fires, cost located, no saving CLAIMED", and
+# four consumers read it as a measured zero -- severity (relabelling a declared
+# medium as LOW), rank (burying a finding on 27.9% of spend below one worth
+# 1.3%), the header's `largest single item` (~0% above evidence saying 27.9%),
+# and union_lower_bound_pct, which is the value #28 established must not carry
+# that meaning. It reached the union through the ADDABLE path, which the #28
+# guard -- written for an empty pool -- does not cover.
+noclaim=$(python3 - "$ROOT" <<'NOCLAIM'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "lib"))
+import advise
+
+class F:
+    def __init__(self, fid, saving=None, locates=None, sev="medium"):
+        self.id, self.saving_pct, self.locates_pct = fid, saving, locates
+        self.severity = sev
+    ranked_pct = advise.Finding.ranked_pct
+    rank = advise.Finding.rank
+
+bad = []
+
+# A finding claiming no saving cannot contribute to a floor of savings.
+fs = [F("subagent-cost", None, 27.9), F("bash-chatter", 1.3)]
+total, groups = advise.union_lower_bound(fs)
+if total is None or abs(total - 1.3) > 1e-9:
+    bad.append("union is %r with one claimed 1.3%% saving and one no-claim "
+               "finding; want 1.3" % total)
+if any("subagent-cost" in g for g in groups):
+    bad.append("a no-saving finding appears in union_groups: %s" % groups)
+
+# The #28 rule via the other route: a pool whose only member claims nothing.
+only_noclaim = [F("subagent-cost", None, 27.9)]
+t2, g2 = advise.union_lower_bound(only_noclaim)
+if t2 is not None:
+    bad.append("union is %r when every finding declines to claim a saving; "
+               "0.0 reads as 'nothing to save' off a report carrying 27.9%%"
+               % t2)
+if g2:
+    bad.append("union groups %s with nothing claimed" % g2)
+
+# Ranked by what it locates, not by the absent saving -- and the renderer
+# shows that same number, so the figure seen is the figure that placed it.
+big = F("subagent-cost", None, 27.9)
+small = F("bash-chatter", 1.3)
+if big.ranked_pct <= small.ranked_pct:
+    bad.append("a finding locating 27.9%% ranks at %.2f, at or below a 1.3%% "
+               "saving" % big.ranked_pct)
+# One that locates nothing material stays low, as its own evidence says.
+hygiene = F("mcp-schema", None, None, "low")
+if hygiene.ranked_pct != 0.0:
+    bad.append("a finding locating nothing ranks at %.2f, not 0"
+               % hygiene.ranked_pct)
+
+# severity_for must not be applied to a saving that was never claimed.
+if advise.severity_for(0.0) != "low":
+    bad.append("severity_for(0.0) is no longer low; the #30 case changes")
+src = open(os.path.join(sys.argv[1], "scripts", "lib", "advise.py")).read()
+if "if f.saving_pct is not None:\n                f.severity = severity_for(" not in src:
+    bad.append("severity is derived unconditionally again; a declared medium "
+               "becomes LOW on a finding that claimed no saving")
+
+# 0.0 must no longer be used as the placeholder anywhere.
+import re
+for m in re.finditer(r"saving_pct=0\.0", src):
+    bad.append("saving_pct=0.0 is back; 'no saving claimed' is None and 0.0 "
+               "now means a measured zero")
+print("|".join(bad) if bad else "CLEAR")
+NOCLAIM
+)
+[[ $noclaim == CLEAR ]] && ok "a finding may locate cost without claiming a saving, and is not read as zero" \
+                        || bad "no-saving findings are read as measured zero" "${noclaim//|/$'\n        '}"
+
 # #28: the union ARITHMETIC was right and the SENTENCES were wrong, which is
 # why the check above did not catch either bug. A summary line read alone said
 # "taken together they are worth at least 1.3%" directly above a 15.3% finding,
@@ -1929,6 +2001,11 @@ def resolves_ok(expr, depth=0):
     `derived_pct` was assigned.
     """
     flat = " ".join(expr.split())
+    # None is "no saving CLAIMED" (#30) and bypasses the conversion by design:
+    # there is nothing to convert. A literal 0.0 no longer means that -- it now
+    # means a measured zero, and a detector that means "none" must say None.
+    if flat == "None":
+        return True
     if flat in ("0.0", "0"):
         return True
     if "to_spend(" in flat or "out_share" in flat or 'PRICE["output"]' in flat:
