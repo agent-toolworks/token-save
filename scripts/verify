@@ -1013,10 +1013,66 @@ for line in two.splitlines():
             bad.append("summary line states %s%% without naming the exclusion "
                        "on the same line: %r" % (m.group(1), line.strip()))
 
-# A report with no excluded finding keeps the plain wording.
+# A report with no excluded finding keeps the plain wording. NOTE: preamble and
+# attachments are in the SAME overlap group, so this pair alone cannot reach the
+# case where the banner is false -- which is how #29 shipped. The disjoint pair
+# below is the one that exercises it.
 three = run("--only", "preamble,attachments")
 if "at least" in three and "excluding" in three:
     bad.append("plain report names an exclusion that did not fire")
+
+# #29: the banner must follow the GROUPING, not a count of findings. Two
+# additive findings were told not to be added, and their sum printed beneath.
+#
+# Each case declares the arrangement it needs and FAILS if the fixture does not
+# produce it. Every previous version of this check passed vacuously instead:
+# the pair chosen for the no-overlap case was in one overlap group (#29), and
+# the ids used before that do not fire on this fixture at all, so the loop
+# asserted nothing. A fixture that cannot reach the case must say so.
+import json as _json
+
+def run_json(*args):
+    r = subprocess.run([ts, "advise", "--root", os.path.join(tmp, "bulk"),
+                        "--json"] + list(args), env=env,
+                       capture_output=True, text=True)
+    try:
+        return _json.loads(r.stdout)
+    except Exception:
+        return None
+
+# (selection, findings wanted, overlapping groups wanted, excluded wanted)
+CASES = [
+    ("bash-bulk,preamble", 2, 0, 0),      # disjoint pair: banner must be ABSENT
+    ("preamble", 1, 0, 0),                # lone finding: no banner, no "together"
+    ("session-length,preamble", 2, 0, 1), # exclusion present: banner TRUE
+    ("session-length", 1, 0, 1),          # lone excluded: no banner (#28)
+]
+for sel, want_n, want_merged, want_excl in CASES:
+    d = run_json("--only", sel)
+    txt = run("--only", sel)
+    if d is None:
+        bad.append("--only %s produced no JSON" % sel)
+        continue
+    n_found = len(d["findings"])
+    merged_n = sum(1 for g in d["union_groups"] if len(g) > 1)
+    excl_n = len(d["union_excluded"])
+    if (n_found, merged_n, excl_n) != (want_n, want_merged, want_excl):
+        bad.append("--only %s did not build its case: %d findings / %d merged "
+                   "groups / %d excluded, wanted %d/%d/%d -- the check cannot "
+                   "assert anything about an arrangement it did not construct"
+                   % (sel, n_found, merged_n, excl_n,
+                      want_n, want_merged, want_excl))
+        continue
+    overlaps = merged_n > 0 or (excl_n > 0 and n_found > 1)
+    said = "findings overlap" in txt
+    if said != overlaps:
+        bad.append("--only %s: banner %s but %d merged group(s), %d excluded, "
+                   "%d finding(s)" % (sel, "printed" if said else "absent",
+                                      merged_n, excl_n, n_found))
+    n_addable = n_found - excl_n
+    if "taken together" in txt and n_addable < 2:
+        bad.append("--only %s: 'taken together' with %d addable finding(s)"
+                   % (sel, n_addable))
 print("|".join(bad) if bad else "CLEAR")
 SAY
 )

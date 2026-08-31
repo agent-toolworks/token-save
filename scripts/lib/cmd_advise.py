@@ -43,31 +43,46 @@ def _render(findings, fleet, show_all: bool, blocked=(), only=None) -> None:
     excluded = [f for f in findings if f.id in advise.UNION_EXCLUDED]
     union, groups = advise.union_lower_bound(findings)
 
-    # Both of these need a second finding to be true. With one finding the
-    # report was telling a reader not to add a single number together, and
-    # describing it as overlapping "all of the above" with nothing above it.
-    if len(findings) > 1:
+    merged = [g for g in groups if len(g) > 1]
+    note = ("; %s counted once" % ", ".join("+".join(g) for g in merged)
+            if merged else "")
+
+    # Tied to the grouping, not to a count of findings. Guarding on
+    # `len(findings) > 1` said "findings overlap" for any two findings, so a
+    # report of two ADDITIVE findings told the reader not to add them and then
+    # printed their sum on the next line. The predicate is whether anything
+    # actually overlaps: a group with more than one member, or an excluded
+    # finding, which overlaps everything by definition.
+    # An excluded finding overlaps the others -- but only if there ARE others.
+    # `merged or excluded` alone reintroduced #28: a lone session-length was
+    # told not to add its single percentage to itself.
+    if merged or (excluded and len(findings) > 1):
         print("  " + R.dim("findings overlap — do not add these percentages "
                            "together"))
 
     # Saying only what NOT to compute left the reader with eight numbers, a
     # warning, and no total. The floor counts each overlapping group once, so
     # it is what the findings are worth together AT LEAST.
-    merged = [g for g in groups if len(g) > 1]
-    note = ("; %s counted once" % ", ".join("+".join(g) for g in merged)
-            if merged else "")
+    addable = [f for f in findings if f.id not in advise.UNION_EXCLUDED]
     if union is not None and excluded:
         # The exclusion is named in the SAME sentence as the number, not on the
         # line below it. "taken together they are worth at least 1.3%" sat
         # directly above a 15.3% finding and reads as the total opportunity --
         # and the summary is the part written to be read alone.
-        print("  " + R.dim("the addable findings are worth ")
+        print("  " + R.dim("the addable finding%s %s worth "
+                           % ("" if len(addable) == 1 else "s",
+                              "is" if len(addable) == 1 else "are"))
               + R.bold("at least %.1f%%" % union)
-              + R.dim(" of spend, excluding %s, which multiplies them rather "
+              + R.dim(" of spend, excluding %s, which multiplies %s rather "
                       "than adding%s"
                       % (", ".join("`%s` (%.1f%%)" % (f.id, f.saving_pct)
-                                   for f in excluded), note)))
-    elif union is not None:
+                                   for f in excluded),
+                         "it" if len(addable) == 1 else "them", note)))
+    elif union is not None and len(addable) > 1:
+        # With a single addable finding and nothing excluded, this said "taken
+        # together they are worth at least 1.3%" with nothing to take it
+        # together with -- and the number restates `largest single item` on the
+        # line directly above.
         print("  " + R.dim("taken together they are worth ")
               + R.bold("at least %.1f%%" % union)
               + R.dim(" of spend%s" % note))
