@@ -620,6 +620,49 @@ CRLF
 [[ $crlf == CLEAR ]] && ok "fixes preserve CRLF and LF alike, and never mix the two" \
                      || bad "line endings not preserved" "${crlf//|/$'\n        '}"
 
+# #24: the assertion above is the right one and could not fail. It guards a
+# Windows-only property from two POSIX runners -- removing newline="" from the
+# write path left all 76 checks green, because Python only translates when
+# newline is None and os.linesep is already "\n" here. On Windows the same
+# one-word change doubles the CR of every appended line.
+#
+# The dependency is now gone rather than guarded: fixes.py does its own
+# encoding and writes bytes, so there is no mode in which a platform can
+# translate anything. That is a STRUCTURAL property, so it gets a structural
+# check -- behavioural proof of the old bug needs a Windows runner, which is
+# the other half of #24 and not a thing this suite can assert.
+iomode=$(python3 - "$ROOT" <<'IOMODE'
+import ast, os, sys
+
+src = os.path.join(sys.argv[1], "scripts", "lib", "fixes.py")
+tree = ast.parse(open(src).read())
+bad = []
+found = 0
+for node in ast.walk(tree):
+    if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "open"):
+        continue
+    found += 1
+    mode = ""
+    if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+        mode = node.args[1].value or ""
+    kw = {k.arg for k in node.keywords}
+    if "b" not in mode:
+        bad.append("fixes.py:%d opens in text mode (%r); a fix target must be "
+                   "read and written as bytes or the platform decides the "
+                   "line endings" % (node.lineno, mode))
+    if "encoding" in kw or "newline" in kw:
+        bad.append("fixes.py:%d passes a text-mode argument (%s); binary mode "
+                   "takes neither, so this is text mode in disguise"
+                   % (node.lineno, ", ".join(sorted(kw))))
+if not found:
+    bad.append("no open() calls found in fixes.py -- this check has stopped "
+               "checking anything")
+print("|".join(bad) if bad else "CLEAR")
+IOMODE
+)
+[[ $iomode == CLEAR ]] && ok "fixes.py reads and writes bytes; no platform can translate a newline" \
+                       || bad "fixes.py is back on text-mode I/O" "${iomode//|/$'\n        '}"
+
 # A byte-order mark is invisible in most editors, Windows writes one by
 # default, and json.load under plain utf-8 rejects it -- so a valid config was
 # reported as "does not parse", which describes no observable defect. Configs

@@ -90,8 +90,8 @@ def _backup_and_write(path: str, text: str, append: bool = False):
         if os.path.isfile(path):
             backup = _backup(path)
         if append:
-            with open(path, "a", newline="") as fh:
-                fh.write(text)
+            with open(path, "ab") as fh:
+                fh.write(text.encode("utf-8"))
         else:
             _write(path, text)
         return True, backup
@@ -115,13 +115,20 @@ def _latest_backup(path: str):
 
 
 def _read(path: str) -> str:
-    # newline="" disables universal-newline translation, so a CRLF file comes
-    # back with its CRLFs. Without it Python converts on read and writes "\n"
-    # back out, and a one-key change becomes a whole-file diff on Windows --
-    # which is the exact failure the in-place editing was written to remove.
+    # Bytes in, decoded explicitly. Text mode brought two platform-conditional
+    # behaviours that only differ off POSIX, so neither CI runner could see
+    # them: universal-newline translation (which turned a one-key change into
+    # a whole-file diff on Windows, the failure in-place editing exists to
+    # remove) and a locale-default encoding, which is cp1252 on Windows and
+    # would mangle a UTF-8 config on the way through.
+    #
+    # Decoded as utf-8, NOT utf-8-sig: a BOM is content to preserve here, and
+    # _split_bom holds it aside for parsing and puts it back on write.
+    # machine.py reads the same files with utf-8-sig because it only parses
+    # them and never writes them back.
     try:
-        with open(path, "r", errors="replace", newline="") as fh:
-            return fh.read()
+        with open(path, "rb") as fh:
+            return fh.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
 
@@ -151,9 +158,17 @@ def _newline(text: str) -> str:
 
 
 def _write(path: str, text: str) -> None:
-    """Write bytes through unchanged. newline="" is the whole point."""
-    with open(path, "w", newline="") as fh:
-        fh.write(text)
+    """Write bytes through unchanged -- literally, now, rather than by argument.
+
+    This used to be text mode with newline="", which is correct but
+    platform-conditional: Python only translates when newline is None, and on
+    POSIX os.linesep is already "\n", so dropping the argument was a no-op on
+    both CI runners and doubled the CR of every line on Windows. A test that
+    cannot fail on any platform CI runs is not evidence, so the dependency is
+    removed rather than guarded.
+    """
+    with open(path, "wb") as fh:
+        fh.write(text.encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
