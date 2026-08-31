@@ -724,6 +724,92 @@ PRE
 [[ $pre == CLEAR ]] && ok "preamble sums each session's own floor over its own turns" \
                     || bad "preamble mixes main-chain and fleet-wide populations" "${pre//|/$'\n        '}"
 
+# #26: attributed/med was unclamped, so the mechanism meant to REDUCE the claim
+# ("only the part that can be NAMED is counted as recoverable") could raise it
+# without bound. The two inputs are medians over different session sets -- the
+# evidence already says so when they cross -- and a fleet whose listings
+# overshoot its floor drove the ratio to 1.526, making the tightened number
+# 1.5x the flat assumption, with an intermediate at 121% of cache reads.
+clamp=$(python3 - "$ROOT" <<'CLAMP'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "lib"))
+import advise
+from transcripts import Fleet, Session, pct
+
+def exact_share(fleet):
+    """The detector's own share, not the rounded one from the evidence line."""
+    cost = sum((s.floor or 0) * s.turns for s in fleet.sessions)
+    return pct(cost, fleet.billed()["cache_read"])
+
+def fleet_with(listings, per_session):
+    def sess(sid):
+        s = Session(path="/x/%s.jsonl" % sid, project="-x", session_id=sid, turns=20)
+        s.ctx_sizes = [22_062] * 5
+        s.billed["cache_read"] = 0
+        s.attach_types = dict(listings)
+        return s
+    ss = [sess("s%d" % i) for i in range(9)]
+    ss[0].billed["cache_read"] = 5_000_000
+    mach = {"memory": {"files": [], "total": 0, "per_session": per_session},
+            "skills": {"count": 9, "desc_total": 15_000, "total": 60_000}}
+    return Fleet(sessions=ss), mach
+
+bad = []
+
+# Listings that exceed the floor: the overshoot case.
+fleet, mach = fleet_with({"skill_listing": 15_000,
+                          "deferred_tools_delta": 15_000}, 3_668)
+f = advise.d_preamble(fleet, mach)
+if f is None:
+    bad.append("d_preamble did not fire on the overshoot fixture")
+else:
+    if f.attribution["residual"] >= 0:
+        bad.append("fixture does not overshoot (residual %d); it checks nothing"
+                   % f.attribution["residual"])
+    share = exact_share(fleet)
+    flat = advise.to_spend(fleet, share) * 0.33
+    # The whole point of the ratio is to TIGHTEN. It must never loosen.
+    if f.saving_pct > flat + 1e-9:
+        bad.append("overshoot inflates the saving: %.4f%% vs flat %.4f%% (%.3fx)"
+                   % (f.saving_pct, flat, f.saving_pct / flat if flat else 0))
+    # A negative share of "could not be attributed" is self-contradictory in
+    # the one line whose job is to let a reader judge the number.
+    words = f.assumption.replace(",", "").split()
+    if any(w.startswith("-") and w.rstrip("%").lstrip("-").replace(".", "").isdigit()
+           for w in words):
+        bad.append("assumption prints a negative percentage: %s" % f.assumption)
+
+# A normal fleet must still be tightened, or the clamp neutered the feature.
+fleet, mach = fleet_with({"skill_listing": 4_000}, 1_000)
+f = advise.d_preamble(fleet, mach)
+if f is None:
+    bad.append("d_preamble did not fire on the normal fixture")
+else:
+    share = exact_share(fleet)
+    flat = advise.to_spend(fleet, share) * 0.33
+    if f.saving_pct >= flat - 1e-9:
+        bad.append("attribution no longer tightens the flat assumption "
+                   "(%.4f%% vs %.4f%%)" % (f.saving_pct, flat))
+
+# No detector plausibly recovers more than all of spend. Asserted rather than
+# clamped at runtime: a clamp would have hidden the bug above instead of
+# surfacing it, and would hide the next one in this class too.
+for fl, mc in (fleet_with({"skill_listing": 15_000,
+                           "deferred_tools_delta": 15_000}, 3_668),):
+    for det in advise.CATALOGUE.values():
+        try:
+            got = det(fl, mc)
+        except Exception:
+            continue
+        if got is not None and got.saving_pct > 100:
+            bad.append("%s reports saving_pct %.1f%%, above 100%% of spend"
+                       % (got.id, got.saving_pct))
+print("|".join(bad) if bad else "CLEAR")
+CLAMP
+)
+[[ $clamp == CLEAR ]] && ok "preamble attribution can only tighten the saving, never inflate it" \
+                      || bad "preamble attribution ratio is unclamped" "${clamp//|/$'\n        '}"
+
 # A byte-order mark is invisible in most editors, Windows writes one by
 # default, and json.load under plain utf-8 rejects it -- so a valid config was
 # reported as "does not parse", which describes no observable defect. Configs

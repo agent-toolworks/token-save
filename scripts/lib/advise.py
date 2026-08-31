@@ -365,27 +365,56 @@ def d_preamble(fleet, mach):
                   "SKILL.md files)".format(sk["count"], sk.get("desc_total", 0),
                                            sk["total"]))
 
+    # #26: attributed/med was unclamped, so the mechanism meant to REDUCE the
+    # claim could raise it without bound. attributed and med are medians over
+    # different session sets -- the evidence line above already says so when
+    # they cross -- and on a machine whose listings overshoot its floor the
+    # ratio went to 1.526, making the "tightened" number 1.5x the flat
+    # assumption it was tightening. The intermediate reached 121% of cache
+    # reads, which nothing downstream would have questioned.
+    #
+    # Clamping and "fall back to the flat assumption on overshoot" were raised
+    # as alternatives. They are the same number: min(1.0, ratio) is exactly 1.0
+    # here, and share * 1.0 IS the flat assumption. So the ratio is clamped for
+    # the arithmetic and the assumption line says which case it is in, rather
+    # than choosing between a monotone number and an honest sentence.
+    ratio = min(1.0, attributed / float(med)) if attributed and med else None
+    overshoot = attributed and residual < 0
+
+    if not attributed:
+        assumption = ("a third of the preamble is removable — nothing in it "
+                      "could be attributed to a source, so this is the old "
+                      "flat assumption")
+    elif overshoot:
+        # pct(residual, med) is negative here, and printing "the -53% that
+        # could not be attributed" is self-contradictory in the one line whose
+        # job is to let a reader judge whether to trust the number.
+        assumption = ("the itemisation overshoots the measured preamble by "
+                      "{:,} tokens — these are medians over different session "
+                      "sets, so the split is not reliable enough to scale by "
+                      "and this is the flat assumption: a third of the "
+                      "preamble is removable".format(-residual))
+    else:
+        assumption = ("a third of the %s tokens that could be attributed is "
+                      "removable; the %.0f%% that could not is not counted as "
+                      "recoverable"
+                      % ("{:,}".format(attributed), pct(residual, med)))
+
     # Only the read-multiplied share is recoverable, and only partly: a trim of
     # a third of the preamble is an aggressive but achievable target.
     return Finding(
         id="preamble",
         title="Fixed preamble is re-read every turn",
         severity=sev, confidence="estimated",
-        assumption=(
-            "a third of the %s tokens that could be attributed is removable; "
-            "the %.0f%% that could not is not counted as recoverable"
-            % ("{:,}".format(attributed), pct(residual, med))
-            if attributed else
-            "a third of the preamble is removable — nothing in it could be "
-            "attributed to a source, so this is the old flat assumption"),
+        assumption=assumption,
         # Only the part that can be NAMED is counted as recoverable. The old
         # number took a third of the whole preamble, including a residual that
         # is mostly system prompt and built-in tool schemas -- and on this
         # machine that residual is 77%, so the old figure was projecting a trim
         # of something the reader cannot edit. Where nothing can be attributed
         # the flat assumption is kept rather than silently reporting zero.
-        saving_pct=(to_spend(fleet, share * attributed / float(med)) * 0.33
-                    if attributed and med else to_spend(fleet, share) * 0.33),
+        saving_pct=(to_spend(fleet, share * ratio) * 0.33
+                    if ratio is not None else to_spend(fleet, share) * 0.33),
         gate=gate,
         attribution={"total": med,
                      "parts": [(v, l, h) for v, l, h in parts],
