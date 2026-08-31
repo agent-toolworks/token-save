@@ -1,15 +1,15 @@
 {
- "amplification": 44.9,
+ "amplification": 59.8,
  "bash": {
-  "command_tokens": 15,
+  "command_tokens": 13,
   "output": {
-   "max": 7,
-   "median": 7,
+   "max": 12,
+   "median": 12,
    "n": 1,
-   "p75": 7,
-   "p90": 7,
-   "p99": 7,
-   "total": 7
+   "p75": 12,
+   "p90": 12,
+   "p99": 12,
+   "total": 12
   }
  },
  "billed": {
@@ -20,23 +20,23 @@
  },
  "by_tool": {
   "call_inputs": {
-   "Bash": 15,
-   "Read": 50
+   "Bash": 13,
+   "Read": 74
   },
   "calls": {
    "Bash": 1,
    "Read": 4
   },
   "results": {
-   "Bash": 7,
-   "Read": 1132
+   "Bash": 12,
+   "Read": 804
   }
  },
  "content": {
-  "tool call inputs": 65,
-  "tool results (text)": 1139
+  "tool call inputs": 87,
+  "tool results (text)": 816
  },
- "content_total": 1204,
+ "content_total": 903,
  "cost_units": 6900.0,
  "findings": [
   {
@@ -48,7 +48,7 @@
   {
    "confidence": "estimated",
    "id": "reasoning-cost",
-   "saving_pct": 5.62,
+   "saving_pct": 5.09,
    "severity": "medium"
   },
   {
@@ -61,8 +61,8 @@
  "generated_by": "ts share",
  "platform": {
   "os": "Darwin",
-  "python": "3.9",
-  "tokenizer": "estimate(len/3.6)"
+  "python": "3.13",
+  "tokenizer": "tiktoken(cl100k_base)"
  },
  "scale": {
   "sessions": 1,

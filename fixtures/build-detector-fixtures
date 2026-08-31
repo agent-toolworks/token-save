@@ -38,8 +38,20 @@ def text_of(n: int) -> str:
     s = FILL * (int(n * 6 / len(FILL)) + 2)
     while toks(s) < n:
         s += FILL
-    while len(s) > 1 and toks(s[:-1]) >= n:
-        s = s[:-1]
+    # Binary search for the shortest prefix that still reaches the target.
+    # Trimming one character at a time costs O(len) tokenizer calls, which is
+    # nothing under the len/3.6 estimator and ruinous under tiktoken -- CI runs
+    # this suite a second time with tiktoken installed, and that run took 15-21
+    # minutes against 6 seconds locally. Same result, ~13 calls instead of
+    # thousands.
+    lo, hi = 1, len(s)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if toks(s[:mid]) >= n:
+            hi = mid
+        else:
+            lo = mid + 1
+    s = s[:lo]
     _cache[n] = s
     return s
 

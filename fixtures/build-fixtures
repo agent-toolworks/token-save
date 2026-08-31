@@ -42,9 +42,10 @@ _cache = {}
 def text_of(target_tokens: int) -> str:
     """A string of exactly `target_tokens` tokens under the ACTIVE counter.
 
-    Grows past the target, then trims one character at a time. Slow in
-    principle, trivial in practice: fixtures use a handful of distinct sizes
-    and the results are memoised.
+    Grows past the target, then binary-searches for the shortest prefix that
+    still reaches it. The trim used to be one character at a time, which is
+    O(len) tokenizer calls -- free under the len/3.6 estimator and ruinous
+    under tiktoken, which CI installs for a second pass. Memoised either way.
     """
     if target_tokens in _cache:
         return _cache[target_tokens]
@@ -53,8 +54,20 @@ def text_of(target_tokens: int) -> str:
     s = FILL * (int(target_tokens * 6 / len(FILL)) + 2)
     while toks(s) < target_tokens:
         s += FILL
-    while len(s) > 1 and toks(s[:-1]) >= target_tokens:
-        s = s[:-1]
+    # Binary search for the shortest prefix that still reaches the target.
+    # Trimming one character at a time costs O(len) tokenizer calls, which is
+    # nothing under the len/3.6 estimator and ruinous under tiktoken -- CI runs
+    # this suite a second time with tiktoken installed, and that run took 15-21
+    # minutes against 6 seconds locally. Same result, ~13 calls instead of
+    # thousands.
+    lo, hi = 1, len(s)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if toks(s[:mid]) >= target_tokens:
+            hi = mid
+        else:
+            lo = mid + 1
+    s = s[:lo]
     _cache[target_tokens] = s
     return s
 
