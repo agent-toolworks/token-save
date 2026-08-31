@@ -19,7 +19,7 @@ done
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 LIB="$ROOT/scripts/lib"
 
-TS_VERSION="0.17.0"
+TS_VERSION="0.18.0"
 # Exported so the Python side can stamp it into a shared profile. A
 # profile that cannot say which version produced it cannot be compared
 # with another one, which is the whole purpose of collecting them.
