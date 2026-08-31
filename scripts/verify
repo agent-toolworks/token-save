@@ -435,6 +435,113 @@ SKL
 [[ $skl == CLEAR ]] && ok "skills: deduplicated by name, and sized by description not by file" \
                     || bad "skills footprint wrong" "${skl//|/$'\n        '}"
 
+# Real transcripts contain well-formed JSON of shapes nobody would write into
+# a fixture. A `Read` whose `offset` is a LIST -- two records in 5,248 -- made
+# the read key unhashable and took down four of five commands across a
+# thousand-transcript corpus, with no partial result and no diagnostic, while
+# this suite reported 52 passed. Fixtures contain the types their author
+# expected; that is the third time that gap has shipped a bug here.
+#
+# Two properties, and they are different: a type confusion the code KNOWS about
+# must be handled (counted, not skipped), and one it does not must be survived
+# (skipped and reported, not fatal).
+hostile=$(python3 - "$TMP" "$ROOT" <<'HOSTILE'
+import json, os, sys
+sys.path.insert(0, os.path.join(sys.argv[2], "scripts", "lib"))
+from transcripts import Fleet
+
+root = os.path.join(sys.argv[1], "hostile")
+proj = os.path.join(root, "proj")
+os.makedirs(proj, exist_ok=True)
+U = {"input_tokens": 0, "cache_creation_input_tokens": 0,
+     "cache_read_input_tokens": 9000, "output_tokens": 50}
+
+
+def call(tid, name, inp):
+    return {"type": "assistant", "message": {
+        "role": "assistant",
+        "content": [{"type": "tool_use", "id": tid, "name": name,
+                     "input": inp}], "usage": U}}
+
+
+def result(tid, content):
+    return {"type": "user", "message": {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": tid,
+                     "content": content}]}}
+
+
+recs = [
+    # A normal read, so there is something to get right.
+    call("t1", "Read", {"file_path": "/a.py", "offset": 1, "limit": 50}),
+    result("t1", "text " * 200),
+    # The reported shape: offset is a list. Must be ACCOUNTED FOR, not skipped.
+    call("t2", "Read", {"file_path": "/a.py", "offset": [389, 415], "limit": 50}),
+    result("t2", "text " * 200),
+    call("t3", "Read", {"file_path": "/a.py", "offset": [430, 435], "limit": None}),
+    result("t3", "text " * 200),
+    # Shapes nobody has reported yet. These may be skipped, but must not be
+    # fatal -- that is the whole point of the guard.
+    call("t4", "Read", ["not", "a", "dict"]),
+    result("t4", "text " * 200),
+    call("t5", "Bash", {"command": {"nested": "dict where a string belongs"}}),
+    result("t5", {"weird": ["shape", 1, None]}),
+    {"type": "assistant", "message": {"role": "assistant",
+                                      "content": "a string, not a list",
+                                      "usage": U}},
+]
+with open(os.path.join(proj, "s.jsonl"), "w") as fh:
+    for r in recs:
+        fh.write(json.dumps(r) + "\n")
+
+bad = []
+try:
+    f = Fleet.load(root=root)
+except Exception as exc:
+    print("a hostile transcript raised %s: %s" % (type(exc).__name__, exc))
+    raise SystemExit(0)
+
+if not f.turns():
+    bad.append("nothing was accounted for; the guard swallowed the whole file")
+reads = {}
+for sess in f.sessions:
+    reads.update(sess.reads)
+# The three reads differ only by range, and all three must be present and
+# distinct -- a list offset is a DIFFERENT range, not an unusable record.
+if len(reads) != 3:
+    bad.append("expected 3 distinct read keys (1, [389,415], [430,435]), got "
+               "%d: %r" % (len(reads), sorted(reads)))
+if any(not isinstance(k, tuple) or any(not isinstance(x, str) for x in k)
+       for k in reads):
+    bad.append("read keys are not fully coerced to strings: %r" % sorted(reads))
+if f.skipped() < 1:
+    bad.append("no record was reported skipped, though the file contains "
+               "shapes the accounting cannot use")
+print("|".join(bad) if bad else "CLEAR skipped=%d reads=%d" % (f.skipped(), len(reads)))
+HOSTILE
+)
+if [[ $hostile == CLEAR* ]]; then
+  ok "a hostile transcript degrades: known types handled, unknown ones skipped ${DIM}(${hostile#CLEAR })${OFF}"
+else
+  bad "hostile transcript not survived" "${hostile//|/$'\n        '}"
+fi
+
+# And end to end: the commands must still RUN. The regression was not a wrong
+# number, it was four of five commands exiting 1 on a corpus that was 99.96%
+# fine, so the check is that they complete.
+# `doctor` reads the present rather than a corpus and takes no --root, so it
+# is pointed at the hostile tree through TS_TRANSCRIPT_DIR, which is what
+# transcript_dir() honours. It was one of the four commands that died.
+ran=""
+for cmd in audit advise doctor share; do
+  TS_TRANSCRIPT_DIR="$TMP/hostile" bounded 60 "$TS" "$cmd" \
+      >/dev/null 2>"$TMP/hostile.$cmd.err" || ran="$ran $cmd(exit)"
+  grep -qi traceback "$TMP/hostile.$cmd.err" && ran="$ran $cmd(traceback)"
+done
+[[ -z $ran ]] && ok "audit, advise, doctor and share all complete on a hostile corpus" \
+              || bad "commands still die on a hostile transcript" \
+                     "${ran# }$(printf '\n        '; head -3 "$TMP/hostile.${ran%%(*}.err" 2>/dev/null)"
+
 # A corrupt settings.json must be refused, not overwritten. This is the one
 # failure mode that would destroy user configuration.
 printf '{ this is not json' > "$CLAUDE_CONFIG_DIR/settings.json"

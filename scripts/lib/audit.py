@@ -240,6 +240,7 @@ def _as_json(fleet: Fleet) -> str:
         "tokenizer": tokenizer_name(),
         "sessions": len(fleet.main_sessions()),
         "subagent_transcripts": len(fleet.subagents()),
+        "skipped_records": fleet.skipped(),
         "turns": fleet.turns(),
         "billed": fleet.billed(),
         "cost_units": round(fleet.cost_units(), 1),
@@ -295,6 +296,10 @@ def main(argv=None) -> int:
         print(_as_json(fleet))
         return 0
 
+    skipped = fleet.skipped()
+    if skipped:
+        sys.stderr.write("note: skipped %d unreadable record(s); everything "
+                         "else was accounted for\n" % skipped)
     subn = len(fleet.subagents())
     print(R.bold("\n  %d sessions%s  |  %s  |  %s"
                  % (len(fleet.main_sessions()),

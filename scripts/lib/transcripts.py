@@ -304,7 +304,11 @@ class Session:
     tool_calls: dict = field(default_factory=dict)  # tool name -> call count
     bash_out: list = field(default_factory=list)    # every Bash result size
     bash_cmds: list = field(default_factory=list)   # (tokens, command) per call
-    reads: dict = field(default_factory=dict)       # file path -> [count, tokens]
+    reads: dict = field(default_factory=dict)       # (path, off, lim) -> [count, tokens]
+    # Records that could not be accounted for. Surfaced rather than
+    # swallowed: a tool that silently drops input is worse than one that
+    # says how much it dropped.
+    skipped: int = 0
     images: int = 0
     mtime: float = 0.0
     is_subagent: bool = False
@@ -579,27 +583,39 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
                         if (usage.get("output_tokens") or 0) > (prev.get("output_tokens") or 0):
                             prev["output_tokens"] = usage.get("output_tokens") or 0
                 if isinstance(content, list) and not usage_only:
-                    for b in content:
-                        if not isinstance(b, dict):
-                            continue
-                        t = b.get("type")
-                        if t == "text":
-                            _bump(s.buckets, BUCKET_ASSISTANT,
-                                  toks(b.get("text"), BUCKET_ASSISTANT))
-                        elif t == "thinking":
-                            _bump(s.buckets, BUCKET_THINKING,
-                                  toks(b.get("thinking"), BUCKET_THINKING))
-                        elif t == "tool_use":
-                            name = b.get("name") or "?"
-                            inp = b.get("input") or {}
-                            id2name[b.get("id")] = name
-                            id2input[b.get("id")] = inp
-                            n = toks(json.dumps(inp, default=str), BUCKET_TOOL_IN)
-                            _bump(s.buckets, BUCKET_TOOL_IN, n)
-                            _bump(s.tool_in, name, n)
-                            _bump(s.tool_calls, name, 1)
-                            if name == "Bash":
-                                s.bash_cmds.append((n, str(inp.get("command", ""))))
+                    try:
+                        for b in content:
+                            if not isinstance(b, dict):
+                                continue
+                            t = b.get("type")
+                            if t == "text":
+                                _bump(s.buckets, BUCKET_ASSISTANT,
+                                      toks(b.get("text"), BUCKET_ASSISTANT))
+                            elif t == "thinking":
+                                _bump(s.buckets, BUCKET_THINKING,
+                                      toks(b.get("thinking"), BUCKET_THINKING))
+                            elif t == "tool_use":
+                                name = b.get("name") or "?"
+                                inp = b.get("input") or {}
+                                id2name[b.get("id")] = name
+                                id2input[b.get("id")] = inp
+                                n = toks(json.dumps(inp, default=str), BUCKET_TOOL_IN)
+                                _bump(s.buckets, BUCKET_TOOL_IN, n)
+                                _bump(s.tool_in, name, n)
+                                _bump(s.tool_calls, name, 1)
+                                if name == "Bash":
+                                    s.bash_cmds.append((n, str(inp.get("command", ""))))
+                    except Exception:
+                        # A per-line try/except around json.loads() makes this
+                        # loop robust against malformed JSON and nothing else.
+                        # The other kind exists: well-formed JSON of a shape
+                        # nobody would think to write into a fixture -- a Read
+                        # whose `offset` is a list. Two such records in 5,248
+                        # took down four of five commands with no partial result
+                        # and no diagnostic. A transcript is a log, not an API
+                        # response: skip the record, count it, and report on the
+                        # other 99.96%.
+                        s.skipped += 1
                 continue
 
             # user record
@@ -610,62 +626,81 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
                 continue
             if not isinstance(content, list):
                 continue
-            for b in content:
-                if not isinstance(b, dict):
-                    continue
-                t = b.get("type")
-                if t == "text":
-                    _bump(s.buckets, BUCKET_USER,
-                          toks(b.get("text"), BUCKET_USER))
-                elif t == "image":
-                    n = image_tokens(((b.get("source") or {}).get("data")) or "")
-                    _bump(s.buckets, BUCKET_USER, n)
-                    s.images += 1
-                elif t == "tool_result":
-                    tuid = b.get("tool_use_id")
-                    name = id2name.get(tuid, "?unknown")
-                    cc = b.get("content")
-                    text_n = 0
-                    img_n = 0
-                    # Bash output and other tool results are one bucket in the
-                    # report but two content classes in the estimator: on the
-                    # reporting machine they sit 9% apart, the single largest
-                    # contributor to the spread.
-                    rcls = CPT_BASH if name == "Bash" else BUCKET_TOOL_TEXT
-                    if isinstance(cc, str):
-                        text_n = toks(cc, rcls)
-                    elif isinstance(cc, list):
-                        for blk in cc:
-                            if not isinstance(blk, dict):
-                                continue
-                            if blk.get("type") == "text":
-                                text_n += toks(blk.get("text"), rcls)
-                            elif blk.get("type") == "image":
-                                img_n += image_tokens(((blk.get("source") or {}).get("data")) or "")
-                                s.images += 1
-                    elif cc is not None:
-                        text_n = toks(json.dumps(cc, default=str), rcls)
-                    if text_n:
-                        _bump(s.buckets, BUCKET_TOOL_TEXT, text_n)
-                    if img_n:
-                        _bump(s.buckets, BUCKET_TOOL_IMG, img_n)
-                    _bump(s.tool_out, name, text_n + img_n)
-                    if name == "Bash":
-                        s.bash_out.append(text_n)
-                    elif name in ("Read", "read"):
-                        # Keyed on the RANGE as well as the path. Dropping
-                        # offset/limit made lines 1-50 and lines 400-450 look
-                        # like two reads of the same thing, and everything
-                        # downstream then charged all but one of them as a
-                        # duplicate. 89% of the groups this fired on had every
-                        # read at a different range -- nothing duplicated.
-                        # None/None is the whole file, and is correctly a
-                        # different key from any ranged read of it.
-                        inp = id2input.get(tuid) or {}
-                        rkey = (str(inp.get("file_path", "?")),
-                                inp.get("offset"), inp.get("limit"))
-                        cur = s.reads.get(rkey) or [0, 0]
-                        s.reads[rkey] = [cur[0] + 1, cur[1] + text_n + img_n]
+            try:
+                for b in content:
+                    if not isinstance(b, dict):
+                        continue
+                    t = b.get("type")
+                    if t == "text":
+                        _bump(s.buckets, BUCKET_USER,
+                              toks(b.get("text"), BUCKET_USER))
+                    elif t == "image":
+                        n = image_tokens(((b.get("source") or {}).get("data")) or "")
+                        _bump(s.buckets, BUCKET_USER, n)
+                        s.images += 1
+                    elif t == "tool_result":
+                        tuid = b.get("tool_use_id")
+                        name = id2name.get(tuid, "?unknown")
+                        cc = b.get("content")
+                        text_n = 0
+                        img_n = 0
+                        # Bash output and other tool results are one bucket in the
+                        # report but two content classes in the estimator: on the
+                        # reporting machine they sit 9% apart, the single largest
+                        # contributor to the spread.
+                        rcls = CPT_BASH if name == "Bash" else BUCKET_TOOL_TEXT
+                        if isinstance(cc, str):
+                            text_n = toks(cc, rcls)
+                        elif isinstance(cc, list):
+                            for blk in cc:
+                                if not isinstance(blk, dict):
+                                    continue
+                                if blk.get("type") == "text":
+                                    text_n += toks(blk.get("text"), rcls)
+                                elif blk.get("type") == "image":
+                                    img_n += image_tokens(((blk.get("source") or {}).get("data")) or "")
+                                    s.images += 1
+                        elif cc is not None:
+                            text_n = toks(json.dumps(cc, default=str), rcls)
+                        if text_n:
+                            _bump(s.buckets, BUCKET_TOOL_TEXT, text_n)
+                        if img_n:
+                            _bump(s.buckets, BUCKET_TOOL_IMG, img_n)
+                        _bump(s.tool_out, name, text_n + img_n)
+                        if name == "Bash":
+                            s.bash_out.append(text_n)
+                        elif name in ("Read", "read"):
+                            # Keyed on the RANGE as well as the path. Dropping
+                            # offset/limit made lines 1-50 and lines 400-450 look
+                            # like two reads of the same thing, and everything
+                            # downstream then charged all but one of them as a
+                            # duplicate. 89% of the groups this fired on had every
+                            # read at a different range -- nothing duplicated.
+                            # None/None is the whole file, and is correctly a
+                            # different key from any ranged read of it.
+                            inp = id2input.get(tuid) or {}
+                            # Every component coerced, not just the path.
+                            # `offset` arrives as a LIST in real transcripts
+                            # (`offset = [389, 415]`) -- a malformed tool input
+                            # the harness recorded verbatim. str(None) is
+                            # "None", distinct from any real range, so a whole
+                            # file stays a different key from a ranged read.
+                            rkey = (str(inp.get("file_path", "?")),
+                                    str(inp.get("offset")),
+                                    str(inp.get("limit")))
+                            cur = s.reads.get(rkey) or [0, 0]
+                            s.reads[rkey] = [cur[0] + 1, cur[1] + text_n + img_n]
+            except Exception:
+                # A per-line try/except around json.loads() makes this
+                # loop robust against malformed JSON and nothing else.
+                # The other kind exists: well-formed JSON of a shape
+                # nobody would think to write into a fixture -- a Read
+                # whose `offset` is a list. Two such records in 5,248
+                # took down four of five commands with no partial result
+                # and no diagnostic. A transcript is a log, not an API
+                # response: skip the record, count it, and report on the
+                # other 99.96%.
+                s.skipped += 1
     if pending is not None:
         _flush_usage(s, pending[1])
     return s
@@ -745,6 +780,16 @@ class Fleet:
                     if len(parts) == 3 and parts[1]:
                         out.add(parts[1])
         return out
+
+    def skipped(self) -> int:
+        """Records that could not be accounted for, across every transcript.
+
+        Reported rather than swallowed. A tool that silently drops input is
+        worse than one that says how much it dropped -- and the drop being
+        invisible is what let a two-record type confusion read as a total
+        failure of the tool.
+        """
+        return sum(x.skipped for x in self.sessions)
 
     def main_sessions(self) -> list:
         """Sessions proper. With subagents() this partitions ``sessions``,

@@ -144,6 +144,10 @@ def main(argv=None) -> int:
         }, indent=1))
         return 0
 
+    skipped = fleet.skipped()
+    if skipped:
+        sys.stderr.write("note: skipped %d unreadable record(s); everything "
+                         "else was accounted for\n" % skipped)
     subn = len(fleet.subagents())
     print(R.bold("\n  %d sessions%s  |  %s turns  |  %.0fx amplification  |  %s"
                  % (len(fleet.main_sessions()),
