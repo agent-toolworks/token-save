@@ -261,7 +261,21 @@ def d_preamble(fleet, mach):
     reads = fleet.billed()["cache_read"]
     if not reads:
         return None
-    cost = med * fleet.turns()
+    # Each session's OWN preamble across its OWN turns. This used to be
+    # med * fleet.turns(), which mixed two populations -- a main-chain median
+    # (substantive() excludes subagents, correctly, for a session-shape
+    # statistic) multiplied by a fleet-wide turn count that includes them, and
+    # a subagent's preamble is materially smaller.
+    #
+    # Reported as a 1.116x overstatement; on this machine it came out 0.927x,
+    # an UNDERstatement, because the two error terms move independently:
+    # the population mix was worth -0.3% here (2% subagent turns, against 38%
+    # there) and the median-as-multiplier was worth +8.3%. A median is robust
+    # to the high-turn, large-preamble sessions that dominate the true total,
+    # so it understates a turn-weighted quantity whenever the distribution is
+    # skewed -- an error present even on a fleet with no subagents at all.
+    # Summing per session is exact rather than approximate and removes both.
+    cost = sum((s.floor or 0) * s.turns for s in fleet.sessions)
     share = pct(cost, reads)
     if share < 4 and med < 20000:
         return None
@@ -271,10 +285,26 @@ def d_preamble(fleet, mach):
     ])
     sev = "high" if share >= 12 or med >= 35000 else "medium" if share >= 6 else "low"
 
+    # The old pair of lines was internally consistent and still misleading: a
+    # median over main-chain sessions, then a turn count including subagents
+    # that never carried it. A reader checking the multiplication found it
+    # correct and was misled anyway, which is worse than an obviously wrong
+    # number. The median stays as evidence of a typical session; it is no
+    # longer the multiplier, so the two lines no longer have to agree on a
+    # population.
+    sub_cost = sum((s.floor or 0) * s.turns for s in fleet.sessions
+                   if s.is_subagent)
     ev = ["fixed preamble is {:,} tokens (median across {} sessions)".format(med, len(floors)),
-          "re-read on every one of {:,} turns = {:,} cache-read tokens".format(
-              fleet.turns(), cost),
+          "each session's own preamble over its own turns, summed across "
+          "{:,} turns = {:,} cache-read tokens".format(fleet.turns(), cost),
           "that is {:.1f}% of all cache reads you were billed for".format(share)]
+    if sub_cost:
+        # Separately actionable: a subagent's preamble responds to the same
+        # levers (fewer skills, fewer MCP servers) but is multiplied by however
+        # many get spawned, which is the subagent-cost lever rather than this
+        # one. Invisible while the total was a single median times a turn count.
+        ev.append("    {:,} of that ({:.0f}%) is subagent preamble".format(
+            sub_cost, pct(sub_cost, cost)))
 
     # A finding whose premise is that the preamble is worth auditing has to say
     # what is in it. On the reporting machine it itemised 11,206 of 62,294

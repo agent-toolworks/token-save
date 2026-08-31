@@ -663,6 +663,67 @@ IOMODE
 [[ $iomode == CLEAR ]] && ok "fixes.py reads and writes bytes; no platform can translate a newline" \
                        || bad "fixes.py is back on text-mode I/O" "${iomode//|/$'\n        '}"
 
+# #25: preamble multiplied a MAIN-CHAIN median by a FLEET-WIDE turn count.
+# substantive() excludes subagents (correctly -- it is a session-shape
+# statistic) but fleet.turns() counts them, and a subagent's preamble is
+# materially smaller. Two independent error terms hide in that one line, and
+# they move in opposite directions on different machines: the reporter measured
+# a 1.116x OVERstatement (38% subagent turns), this machine a 0.927x UNDER (2%
+# subagent turns, but a skewed floor distribution the median is robust to).
+#
+# The fixture below is skewed hard enough that median-times-turns and the exact
+# per-session sum cannot be confused for each other.
+pre=$(python3 - "$ROOT" <<'PRE'
+import os, re, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "lib"))
+import advise, machine
+from transcripts import Fleet, Session
+
+def sess(sid, turns, floor, subagent=False):
+    s = Session(path="/x/%s.jsonl" % sid, project="-x", session_id=sid,
+                turns=turns, is_subagent=subagent)
+    s.ctx_sizes = [floor] * 5
+    s.billed["cache_read"] = 0
+    return s
+
+sessions = [sess("m%d" % i, 10, 10_000) for i in range(5)]
+sessions.append(sess("heavy", 500, 50_000))            # skews the true total
+sessions += [sess("a%d" % i, 100, 5_000, True) for i in range(3)]
+sessions[0].billed["cache_read"] = 100_000_000         # a denominator to divide by
+fleet = Fleet(sessions=sessions)
+
+exact = sum((s.floor or 0) * s.turns for s in fleet.sessions)
+med_x_turns = 10_000 * fleet.turns()
+bad = []
+if exact == med_x_turns:
+    bad.append("fixture is not discriminating: both formulas give %d" % exact)
+
+f = advise.d_preamble(fleet, machine.collect())
+if f is None:
+    bad.append("d_preamble did not fire on the fixture, so nothing was checked")
+else:
+    nums = []
+    for line in f.evidence:
+        nums += [int(x.replace(",", "")) for x in re.findall(r"[\d,]{4,}", line)]
+    if exact not in nums:
+        bad.append("evidence carries no exact per-session total %d; got %s"
+                   % (exact, nums))
+    if med_x_turns in nums:
+        bad.append("evidence still carries the median-times-turns product %d"
+                   % med_x_turns)
+    # The subagent share is separately actionable -- it responds to the
+    # subagent-cost lever, not this one -- and was invisible while the total
+    # was a single median times a turn count.
+    sub_exact = sum((s.floor or 0) * s.turns for s in fleet.sessions if s.is_subagent)
+    if not any("subagent preamble" in l for l in f.evidence):
+        bad.append("evidence does not break out the %d of subagent preamble"
+                   % sub_exact)
+print("|".join(bad) if bad else "CLEAR")
+PRE
+)
+[[ $pre == CLEAR ]] && ok "preamble sums each session's own floor over its own turns" \
+                    || bad "preamble mixes main-chain and fleet-wide populations" "${pre//|/$'\n        '}"
+
 # A byte-order mark is invisible in most editors, Windows writes one by
 # default, and json.load under plain utf-8 rejects it -- so a valid config was
 # reported as "does not parse", which describes no observable defect. Configs
