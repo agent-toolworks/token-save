@@ -21,7 +21,13 @@ jobs:
         # tool must run on a bare system python. 3.13 catches anything that
         # depends on removed behaviour.
         python: ["3.9", "3.13"]
-        os: [ubuntu-latest, macos-latest]
+        # macOS only, deliberately. Both machines this tool is developed and
+        # reported against are Macs, and a Windows runner was declined in #24.
+        # Worth knowing what this gives up: Linux was the only case-sensitive
+        # filesystem in the matrix, so a path that differs only in case now
+        # passes here and would fail on a machine that is not a Mac. Revisit
+        # with the Windows question if the tool ever leaves this pair.
+        os: [macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
