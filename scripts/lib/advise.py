@@ -189,6 +189,72 @@ class Finding:
         return (-self.saving_pct, self.id)
 
 
+# How findings relate to one another, declared ONCE per unordered pair.
+#
+# These sentences are the only place the report tells a reader how to combine
+# numbers, which is the one thing it otherwise refuses to do -- so a
+# contradiction here is worse than silence. It happened: #21 changed
+# output-verbosity's basis to STORED output, making it disjoint from
+# reasoning-cost, and reasoning-cost's action line went on describing the old
+# relationship. One report said the pair may be added and must not be added.
+#
+# Prose in two places drifts. A pair declared once and rendered from here
+# cannot, and `verify` asserts no detector hardcodes the phrasing again.
+DISJOINT = "disjoint"    # partition one bill between them; may be added
+SUBSET = "subset_of"     # the first is wholly inside the second
+OVERLAP = "overlaps"     # share tokens; neither contains the other
+
+RELATIONS = {
+    # output-verbosity owns stored output (billed once, re-read thereafter);
+    # reasoning-cost owns the unstored remainder (billed once, never
+    # amplified). Together they are the whole output bill, exactly once.
+    ("output-verbosity", "reasoning-cost"): (DISJOINT, "the output bill"),
+    # Hook types ARE attachment types, and d_attachments prices the whole
+    # bucket including them.
+    ("hook-output", "attachments"): (SUBSET, "hook output"),
+    # The skill, tool and agent listings are counted in both.
+    ("preamble", "attachments"): (OVERLAP, "the harness listings"),
+}
+
+
+def relation_action(me: str, other: str) -> str:
+    """The sentence `me` should carry about `other`, rendered from RELATIONS.
+
+    Both sides of a pair come from the same entry, so the two findings cannot
+    give opposite instructions however either detector is later edited.
+    """
+    key = (me, other) if (me, other) in RELATIONS else (other, me)
+    rel, subject = RELATIONS[key]
+    if rel == DISJOINT:
+        return ("This and `%s` split %s between them rather than overlapping, "
+                "so they may be added." % (other, subject))
+    if rel == OVERLAP:
+        return ("This and `%s` both count %s, so they overlap — take the "
+                "larger rather than the sum." % (other, subject))
+    # SUBSET: the first element of the key is the part, the second the whole.
+    part, whole = key
+    if me == part:
+        return ("This is part of `%s`, which prices the whole bucket "
+                "including %s — do not add them." % (whole, subject))
+    return ("`%s` prices %s, which is part of this — do not add them."
+            % (part, subject))
+
+
+def stored_output(fleet) -> int:
+    """Assistant output that IS in the transcript, and so is re-read.
+
+    The one definition both output detectors stand on. output-verbosity owns
+    this; reasoning-cost owns `billed output - this`. That they partition the
+    output bill exactly once is the claim RELATIONS makes about the pair, and
+    it holds only while both sides read the same number -- so there is one
+    number. It was written out twice, and two identical copies of a definition
+    is how the pair's PROSE drifted apart one level up.
+    """
+    bu = fleet.buckets()
+    return (bu.get("assistant text", 0) + bu.get("assistant thinking", 0)
+            + bu.get("tool call inputs", 0))
+
+
 def severity_for(saving_pct: float) -> str:
     """Severity IS the estimated impact.
 
@@ -245,6 +311,7 @@ def _preamble_actions(parts, residual, med, sk) -> list:
                    "the floor, and it means the editable part is the {:.0f}% "
                    "above it.".format(pct(residual, med),
                                       100 - pct(residual, med)))
+    out.append(relation_action("preamble", "attachments"))
     out.append("Re-run `ts audit` after a change: the preamble is measured, so "
                "a trim shows up as a smaller floor rather than as a hope.")
     return out
@@ -665,8 +732,7 @@ def d_output_verbosity(fleet, mach):
     if out_share < 10:
         return None
     bu = fleet.buckets()
-    stored = (bu.get("assistant text", 0) + bu.get("assistant thinking", 0)
-              + bu.get("tool call inputs", 0))
+    stored = stored_output(fleet)
     direct = pct(stored * PRICE["output"], cost)
     # Through the shared conversion, like every other content share.
     reread = to_spend(fleet, pct(stored, ct))
@@ -702,8 +768,7 @@ def d_output_verbosity(fleet, mach):
             "Add a terseness instruction to CLAUDE.md — `ts fixes apply "
             "terse-output` writes one (with a backup, and a revert).",
             "Ask for diffs rather than whole rewritten files.",
-            "This and `reasoning-cost` split the output bill between them "
-            "rather than overlapping, so they may be added.",
+            relation_action("output-verbosity", "reasoning-cost"),
         ],
         fix="terse-output")
 
@@ -947,8 +1012,7 @@ def d_reasoning_cost(fleet, mach):
     if not billed_out or not cost:
         return None
     bu = fleet.buckets()
-    stored = (bu.get("assistant text", 0) + bu.get("assistant thinking", 0)
-              + bu.get("tool call inputs", 0))
+    stored = stored_output(fleet)
     gap = billed_out - stored
     if gap <= 0:
         return None
@@ -989,8 +1053,10 @@ def d_reasoning_cost(fleet, mach):
         actions=[
             "Lower MAX_THINKING_TOKENS for routine work, or select a lower "
             "effort level when the task does not need deep reasoning.",
-            "This counts the same tokens as `output-verbosity` from the other "
-            "end. Do not add the two together.",
+            # Was: "counts the same tokens as output-verbosity ... do not add
+            # the two together" -- true before #21 moved output-verbosity onto
+            # stored output, and directly contradicting it ever since.
+            relation_action("reasoning-cost", "output-verbosity"),
         ])
 
 
@@ -1059,6 +1125,12 @@ def d_attachments(fleet, mach):
     if not actions:
         actions = ["No single source dominates this bucket; the family split "
                    "above is the finding."]
+    # Unconditional, unlike the family advice above: those lines only render
+    # for a family at >=10% of the bucket, so a machine whose hooks sit at 8%
+    # lost the only statement of how this relates to `hook-output` while
+    # `hook-output` went on firing on its own.
+    actions.append(relation_action("attachments", "hook-output"))
+    actions.append(relation_action("attachments", "preamble"))
     return Finding(
         id="attachments",
         title="Harness-injected content is a large share of content",
@@ -1128,6 +1200,7 @@ def d_hook_output(fleet, mach):
             "message on every turn for the rest of the session.",
             "Where a hook must report, send it to stderr or a log rather than "
             "into the transcript.",
+            relation_action("hook-output", "attachments"),
         ])
 
 

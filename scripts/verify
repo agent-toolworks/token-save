@@ -810,6 +810,97 @@ CLAMP
 [[ $clamp == CLEAR ]] && ok "preamble attribution can only tighten the saving, never inflate it" \
                       || bad "preamble attribution ratio is unclamped" "${clamp//|/$'\n        '}"
 
+# #27: output-verbosity said the pair "may be added" and reasoning-cost said
+# "Do not add the two together" -- in the same report, about each other. #21
+# moved output-verbosity onto STORED output, making them disjoint, and the
+# sibling's prose was not updated. These lines are the only place the report
+# tells a reader how to COMBINE numbers, so a contradiction there is worse
+# than silence: whichever is read first wins.
+#
+# The relationship is now declared once per pair in RELATIONS and rendered from
+# there, so this checks the property that broke -- that nobody hardcodes the
+# phrasing back into a detector, and that every declared pair is stated from
+# both sides.
+rel=$(python3 - "$ROOT" <<'REL'
+import ast, os, re, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "lib"))
+import advise
+
+src = open(os.path.join(sys.argv[1], "scripts", "lib", "advise.py")).read()
+bad = []
+
+# Every pair must name two ids that actually exist, or the sentence points at
+# a finding that cannot appear.
+for (a, b), (kind, subject) in advise.RELATIONS.items():
+    for one in (a, b):
+        if one not in advise.CATALOGUE:
+            bad.append("RELATIONS names %r, which is not a detector" % one)
+    if kind not in (advise.DISJOINT, advise.SUBSET, advise.OVERLAP):
+        bad.append("RELATIONS[%r,%r] has unknown kind %r" % (a, b, kind))
+
+# Both directions must agree on the arithmetic. "may be added" and "do not add"
+# are the two instructions that contradicted each other.
+def verb(text):
+    if "may be added" in text:
+        return "add"
+    if "do not add them" in text or "take the larger" in text:
+        return "do-not-add"
+    return "?"
+
+for (a, b), (kind, _s) in advise.RELATIONS.items():
+    va = verb(advise.relation_action(a, b))
+    vb = verb(advise.relation_action(b, a))
+    if va == "?" or vb == "?":
+        bad.append("%s/%s renders a sentence with no recognisable instruction"
+                   % (a, b))
+    elif va != vb:
+        bad.append("%s says %r and %s says %r about the same pair"
+                   % (a, va, b, vb))
+    want = "add" if kind == advise.DISJOINT else "do-not-add"
+    if va != want:
+        bad.append("%s/%s is declared %s but renders %r" % (a, b, kind, va))
+
+# A self-consistent report can still be FALSE: flipping the declaration to
+# OVERLAP renders two agreeing sentences that are both wrong. So the DISJOINT
+# claim is checked against the data rather than against itself -- the pair
+# partitions the output bill exactly once, which holds only while both
+# detectors read the same `stored` number.
+import transcripts as T
+bu_fleet = T.Fleet(sessions=[])
+for (a, b), (kind, _s) in advise.RELATIONS.items():
+    if kind != advise.DISJOINT:
+        continue
+    if {a, b} != {"output-verbosity", "reasoning-cost"}:
+        continue
+    src_ov = src[src.index("def d_output_verbosity"):]
+    src_ov = src_ov[:src_ov.index("\ndef ")]
+    src_rc = src[src.index("def d_reasoning_cost"):]
+    src_rc = src_rc[:src_rc.index("\ndef ")]
+    for name, body_ in (("output-verbosity", src_ov), ("reasoning-cost", src_rc)):
+        if "stored_output(fleet)" not in body_:
+            bad.append("%s does not use stored_output(); the pair is declared "
+                       "disjoint and that holds only while both read the same "
+                       "number" % name)
+        if 'bu.get("assistant text"' in body_:
+            bad.append("%s recomputes stored inline instead of calling "
+                       "stored_output(); two copies of a definition is how "
+                       "this pair drifted" % name)
+
+# The phrasing must not be hardcoded back into a detector. This is what drifted:
+# two sentences maintained in two places, one of them updated.
+body = src[src.index("def d_"):]          # detectors only, not the renderer
+for phrase in ("may be added", "Do not add the two together",
+               "do not add them"):
+    if phrase in body:
+        line = body[:body.index(phrase)].count("\n") + src[:src.index("def d_")].count("\n") + 1
+        bad.append("detector body hardcodes %r near line %d; render it from "
+                   "RELATIONS instead" % (phrase, line))
+print("|".join(bad) if bad else "CLEAR")
+REL
+)
+[[ $rel == CLEAR ]] && ok "no two findings give contradictory instructions about each other" \
+                    || bad "findings contradict each other on how to combine" "${rel//|/$'\n        '}"
+
 # A byte-order mark is invisible in most editors, Windows writes one by
 # default, and json.load under plain utf-8 rejects it -- so a valid config was
 # reported as "does not parse", which describes no observable defect. Configs
