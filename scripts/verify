@@ -389,9 +389,9 @@ head_ "5. DETECTOR COVERAGE  (every detector has something that fires it)"
 # fire. That is only fair if the existing ones are held to the same bar, so
 # this fails when a detector in CATALOGUE has no profile covering it.
 "$FIX/build-detector-fixtures" --out "$TMP" >/dev/null 2>&1 || true
-declare -a FLEETS=(verbose thinking attachments images rereads subagents chatter bulk)
+declare -a FLEETS=(verbose reasoning attachments images rereads subagents chatter bulk)
 declare -a covered=()
-for prof in verbose:output-verbosity thinking:thinking attachments:attachments \
+for prof in verbose:output-verbosity reasoning:reasoning-cost attachments:attachments \
             images:images rereads:repeat-reads subagents:subagent-cost; do
   name=${prof%%:*}; want=${prof##*:}
   got=$(bounded 60 "$TS" advise --root "$TMP/$name" --json 2>/dev/null \

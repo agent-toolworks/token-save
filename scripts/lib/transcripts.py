@@ -591,6 +591,20 @@ class Fleet:
         a count of one or the other -- never of ``sessions`` under the name
         "sessions", which is what made --limit misreport itself."""
         return [s for s in self.sessions if not s.is_subagent]
+    def mcp_tools_called(self) -> set:
+        """Distinct MCP TOOLS invoked, as ``mcp__<server>__<tool>``.
+
+        A floor on how many definitions are loaded, not the count: a tool that
+        exists and was never called is invisible here. It is a floor measured
+        from this machine's own traffic, which is the point -- the alternative
+        was a constant.
+        """
+        out = set()
+        for sess in self.sessions:
+            for name in sess.tool_calls:
+                if name.startswith("mcp__"):
+                    out.add(name)
+        return out
 
     def subagents(self) -> list:
         return [s for s in self.sessions if s.is_subagent]

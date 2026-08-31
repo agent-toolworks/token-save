@@ -45,7 +45,8 @@ from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from transcripts import PRICE, cd_shape, pct, quantile  # noqa: E402
+from transcripts import (PRICE, cd_shape, pct, quantile,  # noqa: E402
+                         tokenizer_name)
 
 
 def to_spend(fleet, share_pct: float) -> float:
@@ -457,13 +458,34 @@ def d_output_verbosity(fleet, mach):
 
 
 def d_mcp_schema(fleet, mach):
-    """MCP tool definitions sit in the preamble of every turn unless deferred."""
+    """MCP tool definitions sit in the preamble of every turn unless deferred.
+
+    Two different problems share this id and they need different numbers.
+
+    With deferral OFF -- which a custom ANTHROPIC_BASE_URL does silently --
+    every tool definition is in every preamble and the cost scales with how
+    many tools exist. That is estimable from the tools actually called, which
+    is a measured floor on how many are defined.
+
+    With deferral ON the definitions are not in the preamble, so "you have four
+    or more servers" costs approximately nothing. Firing on it was firing on an
+    install property with no workload input at all, and reporting a hardcoded
+    1.0 for it -- a constant, ranked in a list of computed percentages, on
+    every machine with four servers, forever. What IS a workload fact is which
+    configured servers you never call; that is what it reports now, and it is
+    reported as unquantified rather than as a number, because under deferral
+    the saving genuinely is close to nothing.
+    """
     mcp = mach["mcp"]
     if not mcp.get("readable"):
         return None
     n_global = len(mcp["global"])
     n_proj = sum(len(v) for v in mcp["projects"].values())
+    configured = set(mcp["global"])
+    for names in mcp["projects"].values():
+        configured.update(names)
     called = fleet.mcp_servers_called()
+    tools = fleet.mcp_tools_called()
     # Configured is a subset: plugin-provided servers never appear there.
     total = max(n_global + n_proj, len(called))
     if total == 0:
@@ -474,16 +496,19 @@ def d_mcp_schema(fleet, mach):
     # Tool search is on by default in current Claude Code, but a custom base
     # URL turns it off, which is exactly the case a proxy user lands in.
     at_risk = bool(base_url) and tool_search in (None, "", "false", "0", "off")
-    if not at_risk and total < 4:
+    unused = sorted(n for n in configured if n not in called)
+    if not at_risk and not unused:
         return None
-    gate = Gate("any", [
-        Cond("tool deferral off behind a custom base URL", at_risk, None,
-             mode="flag"),
-        Cond("MCP servers configured or called", total, 4),
-    ])
+
+    conds = [Cond("tool deferral off behind a custom base URL", at_risk, None,
+                  mode="flag")]
+    if unused:
+        conds.append(Cond("configured MCP servers never called", len(unused), 1))
+    gate = Gate("any", conds)
+
     ev = ["{} MCP server(s) configured ({} global, {} project-scoped); "
-          "{} actually called".format(
-              n_global + n_proj, n_global, n_proj, len(called))]
+          "{} actually called, over {} distinct tools".format(
+              n_global + n_proj, n_global, n_proj, len(called), len(tools))]
     if len(called) > n_global + n_proj:
         ev.append("{} more were called than are configured — plugin-provided "
                   "servers do not appear in the config".format(
@@ -491,28 +516,54 @@ def d_mcp_schema(fleet, mach):
     for proj, names in list(mcp["projects"].items())[:4]:
         ev.append("    {}: {}".format(
             os.path.basename(proj.rstrip("/")), ", ".join(names)))
-    ev.append("a single MCP tool definition typically costs 200-800 tokens, "
-              "paid on every turn unless deferred")
+
     if at_risk:
+        # Estimate from this machine's own tool surface rather than a constant.
+        # Tools CALLED is a floor on tools defined, so this is a floor on the
+        # cost too -- said in the assumption rather than dressed up as exact.
+        n_defs = max(len(tools), total)
+        per_tool = 400
+        reads = fleet.billed()["cache_read"]
+        defs_cost = n_defs * per_tool * fleet.turns()
+        share = pct(defs_cost, reads) if reads else 0.0
         ev.append("ANTHROPIC_BASE_URL is set and ENABLE_TOOL_SEARCH is not — "
                   "in that combination tool definitions are NOT deferred")
+        ev.append("{} tool definition(s) at ~{} tokens, re-read on every one of "
+                  "{:,} turns = {:,} cache-read tokens ({:.1f}% of all cache "
+                  "reads)".format(n_defs, per_tool, fleet.turns(), defs_cost,
+                                  share))
+        return Finding(
+            id="mcp-schema",
+            title="Tool deferral is off behind a custom base URL",
+            severity="high", confidence="estimated",
+            assumption="~%d tokens per tool definition; tools called (%d) is a "
+                       "floor on tools defined" % (per_tool, len(tools)),
+            saving_pct=to_spend(fleet, share),
+            gate=gate,
+            evidence=ev,
+            actions=[
+                "Set ENABLE_TOOL_SEARCH=true — `ts fixes apply tool-search` "
+                "writes it into settings.json.",
+            ],
+            fix="tool-search")
+
+    ev.append("tool deferral is on, so these definitions are NOT in every "
+              "preamble — the cost of an unused server is small, and no "
+              "number is claimed for it here")
+    ev.append("never called in the transcripts read: " + ", ".join(unused[:8])
+              + ("" if len(unused) <= 8 else " (+%d more)" % (len(unused) - 8)))
     return Finding(
         id="mcp-schema",
-        title=("Tool deferral is off behind a custom base URL" if at_risk
-               else "MCP tool schemas sit in every preamble"),
-        severity="high" if at_risk else "low",
-        confidence="heuristic",
-        saving_pct=6.0 if at_risk else 1.0,
+        title="Configured MCP servers you never call",
+        severity="low", confidence="derived",
+        saving_pct=0.0,
         gate=gate,
         evidence=ev,
-        actions=([
-            "Set ENABLE_TOOL_SEARCH=true — `ts fixes apply tool-search` writes "
-            "it into settings.json.",
-        ] if at_risk else [
-            "Remove MCP servers you do not use from ~/.claude.json; each one's "
-            "definitions are loaded before deferral can help.",
-        ]),
-        fix="tool-search" if at_risk else None)
+        actions=[
+            "Remove the servers above from ~/.claude.json if you do not want "
+            "them. Under deferral this is hygiene rather than a saving: their "
+            "definitions are not loaded up front, only indexed.",
+        ])
 
 
 def d_repeat_reads(fleet, mach):
@@ -580,25 +631,72 @@ def d_images(fleet, mach):
         ])
 
 
-def d_thinking(fleet, mach):
-    buckets = fleet.buckets()
-    th = buckets.get("assistant thinking", 0)
-    if not th:
+def d_reasoning_cost(fleet, mach):
+    """Billed output that is not in the transcript. It is reasoning.
+
+    Claude Code does not persist reasoning. A thinking block is written as
+    ``{"type": "thinking", "thinking": "", "signature": "<opaque>"}`` -- the
+    field is present and EMPTY. The old `thinking` detector gated on thinking
+    reaching 8% of content, so it read a true zero on every real transcript and
+    could not fire on any workload however the threshold was set. Its fixture
+    wrote thinking blocks WITH text, which is why it looked covered: the
+    fixture was richer than the product.
+
+    The cost is real and is observable from the other side. Everything the
+    assistant authored and that IS stored -- its text and its tool-call inputs
+    -- can be compared against what was billed as output, and the difference is
+    reasoning. Output is billed at 5x input, so it is not a rounding error.
+    """
+    b = fleet.billed()
+    billed_out = b["output"]
+    cost = fleet.cost_units()
+    if not billed_out or not cost:
         return None
-    share = pct(th, fleet.content_total())
-    if share < 8:
+    bu = fleet.buckets()
+    stored = (bu.get("assistant text", 0) + bu.get("assistant thinking", 0)
+              + bu.get("tool call inputs", 0))
+    gap = billed_out - stored
+    if gap <= 0:
         return None
+    gap_share = pct(gap, billed_out)
+    # 40%, and the loose threshold is about the estimator rather than the
+    # phenomenon. Billed output is exact; stored content is SIZED by the
+    # tokenizer, so all estimator error lands on one side of this subtraction.
+    # #4 puts the estimator at 28% spread across content classes, and a gap
+    # that undercounting stored content by that much could produce is not
+    # evidence of anything. 40% clears it in the worst direction.
+    if gap_share < 40:
+        return None
+    share_of_spend = pct(gap * PRICE["output"], cost)
     return Finding(
-        id="thinking",
-        title="Extended thinking is a large share of content",
-        severity="low", confidence="estimated",
-        saving_pct=to_spend(fleet, share),
-        gate=Gate("any", [Cond("thinking share of content", share, 8, unit="%")]),
-        evidence=["thinking blocks are ~{:,} tokens ({:.1f}% of content)".format(
-            th, share)],
+        id="reasoning-cost",
+        title="Most billed output is reasoning that is not in the transcript",
+        severity="medium", confidence="estimated",
+        assumption="the whole gap is reasoning, and a third of it goes away at "
+                   "a lower effort level for routine work",
+        saving_pct=share_of_spend * 0.33,
+        gate=Gate("any", [Cond("billed output absent from the transcript",
+                               gap_share, 40, unit="%")]),
+        evidence=[
+            "billed output {:,} tokens; stored assistant content {:,} "
+            "(text + tool-call inputs)".format(billed_out, stored),
+            "{:,} tokens ({:.0f}%) were billed as output and are in no "
+            "transcript".format(gap, gap_share),
+            "stored thinking is {:,} tokens: Claude Code writes the block with "
+            "an empty `thinking` field and an opaque signature, so reasoning is "
+            "not recoverable from a transcript at all".format(
+                bu.get("assistant thinking", 0)),
+            "at {:.0f}x input that is {:.1f}% of cost-weighted spend".format(
+                PRICE["output"], share_of_spend),
+            "stored side sized with {} — estimator error falls entirely on that "
+            "side of the subtraction, which is why the gate is 40% and not "
+            "tighter".format(tokenizer_name()),
+        ],
         actions=[
             "Lower MAX_THINKING_TOKENS for routine work, or select a lower "
             "effort level when the task does not need deep reasoning.",
+            "This counts the same tokens as `output-verbosity` from the other "
+            "end. Do not add the two together.",
         ])
 
 
@@ -707,7 +805,7 @@ DETECTORS = [
     d_mcp_schema,
     d_repeat_reads,
     d_images,
-    d_thinking,
+    d_reasoning_cost,
     d_attachments,
 ]
 
@@ -721,7 +819,7 @@ CATALOGUE = {
     "mcp-schema": "MCP tool schemas / deferral",
     "repeat-reads": "Same files read many times",
     "images": "Screenshots accumulate in context",
-    "thinking": "Extended thinking is a large share of content",
+    "reasoning-cost": "Billed output that is not in the transcript",
     "attachments": "File injections are a large share of content",
 }
 

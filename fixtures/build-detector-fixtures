@@ -78,13 +78,21 @@ def p_verbose():
     return recs
 
 
-def p_thinking():
-    """Thinking blocks dominate content -> thinking."""
+def p_reasoning():
+    """Billed output far exceeds what the transcript stores -> reasoning-cost.
+
+    The fixture this replaced wrote thinking blocks WITH text, and that was the
+    bug in it: real Claude Code writes {"type":"thinking","thinking":"",...},
+    so the old `thinking` detector was validated against a transcript shape the
+    product never emits and could never fire in the field. This fixture models
+    what a machine actually sees -- a large `output_tokens` against a small
+    amount of stored assistant content -- so the detector is exercised on the
+    only evidence a real transcript carries.
+    """
     recs, ctx = [], 20000
     for _ in range(30):
-        recs.append(asst(usage(ctx, 500),
-                         [{"type": "thinking", "thinking": text_of(2000)},
-                          {"type": "text", "text": text_of(20)}]))
+        recs.append(asst(usage(ctx, 500, out=8000),
+                         [{"type": "text", "text": text_of(100)}]))
         ctx += 500
     return recs
 
@@ -169,7 +177,7 @@ def p_subagents(out, name):
 
 PROFILES = {
     "verbose": (p_verbose, "output-verbosity"),
-    "thinking": (p_thinking, "thinking"),
+    "reasoning": (p_reasoning, "reasoning-cost"),
     "attachments": (p_attachments, "attachments"),
     "images": (p_images, "images"),
     "rereads": (p_rereads, "repeat-reads"),

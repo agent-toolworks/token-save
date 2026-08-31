@@ -138,9 +138,14 @@ They are mutually exclusive, and `scripts/verify` proves it against two
 deliberately opposite fixture fleets. A tool that recommends the same thing to
 everyone has not read anything.
 
-Full catalogue: `preamble`, `session-length`, `bash-chatter`, `bash-bulk`,
-`output-verbosity`, `mcp-schema`, `repeat-reads`, `images`, `thinking`,
-`attachments`.
+Full catalogue: `preamble`, `session-length`, `subagent-cost`, `bash-chatter`,
+`bash-bulk`, `output-verbosity`, `mcp-schema`, `repeat-reads`, `images`,
+`reasoning-cost`, `attachments`.
+
+Each finding also reports how far past its own threshold this machine sits.
+Firing is not one bit of information: a machine at 1.05x a threshold and one
+at 3.7x are different facts, and the margin is what separates "you are unusual
+here" from "everybody trips this".
 
 ## Sharing your numbers
 
