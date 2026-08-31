@@ -123,6 +123,41 @@ scripts/verify          # must be green before a PR
 scripts/verify --keep   # keeps the generated fixtures for inspection
 ```
 
+### A fixture contains the types its author expected
+
+This has shipped three bugs, so it is written down rather than relearned:
+
+- **#1** — every fixture was written flat, so a one-level glob that skipped
+  nested subagent transcripts passed the suite while missing 21.9% of billed
+  spend on a real machine.
+- **#3** — every fixture wrote one line per assistant message, so usage counted
+  per line instead of per message read as a ratio of 1.0 and the bug was
+  invisible. Real transcripts split a message across several lines.
+- **#16** — a `Read` whose `offset` is a **list** made a dict key unhashable and
+  took down four of five commands. `scripts/verify` reported 52 passed at the
+  moment `ts audit` could not complete on a real corpus.
+
+The direction varies — a fixture can be simpler than reality, or richer, as the
+retired `thinking` detector was: its fixture wrote thinking blocks *with* text
+while Claude Code writes `{"type":"thinking","thinking":"","signature":...}`, so
+a detector that could never fire in the field looked covered for months.
+
+So: when a fixture and a real transcript could disagree about the **shape** of
+the data, the fixture is not evidence. The `hostile` fleet exists for this and
+is a standing fixture, not one for a particular bug — add to it rather than
+assuming the shapes already there are the only ones.
+
+Two habits that follow, both of which have bitten here:
+
+- **A check that produces no output must fail, not pass.** Two checks in this
+  suite once read an empty stdout — from a crashed probe, and from a subprocess
+  exiting non-zero — as "no problems", and passed while testing nothing. Assert
+  an explicit all-clear token, and assert the subprocess return code.
+- **A check must not depend on the machine running it.** `verify` sandboxes both
+  `CLAUDE_CONFIG_DIR` and `TS_TRANSCRIPT_DIR` for the whole run, so a check that
+  forgets `--root` fails loudly and identically everywhere instead of quietly
+  reading the developer's own config and transcripts.
+
 Expected values live in `fixtures/EXPECTATIONS.json` and are **derived by
 hand**, with the arithmetic written into `_derivation`. Do not paste in
 whatever the program printed — that only proves the program is deterministic.
