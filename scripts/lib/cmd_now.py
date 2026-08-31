@@ -111,6 +111,10 @@ def analyse(sess: Session, window: int = DEFAULT_WINDOW) -> dict:
     return {
         "project": sess.project,
         "session": sess.session_id,
+        # #22 fixed auto-selection, so a subagent is no longer PICKED here.
+        # A path passed deliberately still reaches this, and every line below
+        # was written about a session a human can clear.
+        "is_subagent": sess.is_subagent,
         "turns": sess.turns,
         "context": ctx,
         "floor": floor,
@@ -137,7 +141,8 @@ def _band(a: dict):
 
 def render(a: dict) -> str:
     colour, note = _band(a)
-    out = [R.heading("THIS SESSION  %s / %s" % (a["project"], a["session"][:8]))]
+    label = "SUBAGENT" if a["is_subagent"] else "THIS SESSION"
+    out = [R.heading("%s  %s / %s" % (label, a["project"], a["session"][:8]))]
     out.append(R.kv("turn", "{:,}".format(a["turns"])))
     out.append(R.kv("context now", colour("{:,} tokens".format(a["context"])), note))
     out.append(R.kv("preamble", "{:,} tokens".format(a["floor"])))
@@ -153,7 +158,15 @@ def render(a: dict) -> str:
     out.append("")
 
     be = a["breakeven_turns"]
-    if be == float("inf"):
+    if a["is_subagent"]:
+        # The break-even answers "should I clear?", and a subagent's context is
+        # not the user's to clear -- it ends with the agent. Printing a turn
+        # count here offered advice about an action that does not exist, under
+        # a header that had already claimed to be the reader's own session.
+        out.append("  " + R.dim(
+            "clearing does not apply — a subagent's context ends with the\n"
+            "  agent, and is not the session you are typing into."))
+    elif be == float("inf"):
         out.append("  " + R.green("nothing to gain by clearing")
                    + R.dim(" — this session is still at its preamble"))
     else:
@@ -178,7 +191,7 @@ def render_statusline(a: dict) -> str:
     g = "+%s/t" % human(a["growth_per_turn"])
     be = a["breakeven_turns"]
     colour, _ = _band(a)
-    if be == float("inf"):
+    if a["is_subagent"] or be == float("inf"):
         tail = ""
     elif be <= 3:
         tail = " " + R.red("clear>%.0ft" % max(1, round(be)))

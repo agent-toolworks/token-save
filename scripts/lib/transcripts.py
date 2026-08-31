@@ -433,7 +433,14 @@ def is_subagent_path(path: str, root: str) -> bool:
         rel = os.path.relpath(path, root)
     except ValueError:
         return False
-    return len(rel.split(os.sep)) > 2
+    # A path OUTSIDE the root climbs with '..', which is deep for the wrong
+    # reason. Fleet paths always come from a glob under the root, but `ts now
+    # --session` takes an arbitrary path, and depth alone labelled anything
+    # outside -- /tmp/x.jsonl -- a subagent.
+    parts = rel.split(os.sep)
+    if parts and parts[0] == os.pardir:
+        return False
+    return len(parts) > 2
 
 
 

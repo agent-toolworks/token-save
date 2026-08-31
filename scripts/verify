@@ -1832,6 +1832,68 @@ NOWSUB
 [[ $nowsub == CLEAR ]] && ok "ts now reports the session, not a subagent that wrote more recently" \
                        || bad "ts now selects a subagent" "${nowsub//|/$'\n        '}"
 
+# The other half of #22, reported alongside it and left for a follow-up: after
+# auto-selection was fixed, an explicit --session was the only remaining way to
+# reach a subagent -- and it still called it THIS SESSION and printed a
+# break-even for a context the reader cannot clear. Lower stakes than the
+# selection bug, and the same false claim.
+nowlbl=$(python3 - "$TMP" "$ROOT" <<'NOWLBL'
+import json, os, subprocess, sys
+
+tmp, root = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+proj = os.path.join(tmp, "nowsub", "-Users-x-myrepo")
+main = os.path.join(proj, "main-sess.jsonl")
+sub = os.path.join(proj, "main-sess", "subagents", "agent-ab.jsonl")
+
+env = dict(os.environ)
+env["TS_TRANSCRIPT_DIR"] = os.path.join(tmp, "nowsub")
+bad = []
+
+out = subprocess.run([ts, "now", "--session", sub], env=env,
+                     capture_output=True, text=True).stdout or ""
+if "SUBAGENT" not in out:
+    bad.append("a deliberately-passed subagent is not labelled SUBAGENT")
+if "THIS SESSION" in out:
+    bad.append("a deliberately-passed subagent is still labelled THIS SESSION")
+if "breaks even after" in out:
+    bad.append("a subagent still gets a clear break-even, which is advice "
+               "about an action the reader cannot take")
+
+sl = subprocess.run([ts, "now", "--statusline"], env=env,
+                    input=json.dumps({"transcript_path": sub}),
+                    capture_output=True, text=True).stdout or ""
+if "clear>" in sl:
+    bad.append("the statusline advises clearing a subagent context: %r" % sl.strip())
+
+# The guard must not cost the main chain its own header or its break-even.
+out = subprocess.run([ts, "now", "--session", main], env=env,
+                     capture_output=True, text=True).stdout or ""
+if "THIS SESSION" not in out:
+    bad.append("a main-chain session lost its THIS SESSION header")
+if "breaks even after" not in out:
+    bad.append("a main-chain session lost its break-even line")
+
+# Depth is measured with relpath, so a path OUTSIDE the root climbs with '..'
+# and used to read as deep enough to be a subagent.
+# Must be deep enough that '..' climbing alone clears the >2 depth test --
+# tmp/outside-sess.jsonl is only "../outside-sess.jsonl" from the root, which
+# passes the depth check for the wrong reason and guards nothing.
+outside = os.path.join(tmp, "elsewhere", "a", "b", "outside-sess.jsonl")
+os.makedirs(os.path.dirname(outside), exist_ok=True)
+with open(outside, "w") as fh:
+    fh.write(open(main).read())
+out = subprocess.run([ts, "now", "--session", outside], env=env,
+                     capture_output=True, text=True).stdout or ""
+if "SUBAGENT" in out:
+    bad.append("a transcript outside the root was labelled SUBAGENT on depth "
+               "alone")
+print("|".join(bad) if bad else "CLEAR")
+NOWLBL
+)
+[[ $nowlbl == CLEAR ]] && ok "a subagent reached with --session says SUBAGENT and offers no clearing advice" \
+                       || bad "ts now mislabels a deliberately-passed subagent" "${nowlbl//|/$'\n        '}"
+
 # find_transcripts() means TRANSCRIPTS; find_sessions() means SESSIONS. Reading
 # the first as the second has now caused three separate defects (#8, #16, #22),
 # each found by accident, one at a time. Every caller is listed here with why,
