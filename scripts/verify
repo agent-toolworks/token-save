@@ -66,6 +66,14 @@ TMP=$(mktemp -d)
 # hole that made it unreachable from any sandboxed test.
 export CLAUDE_CONFIG_DIR="$TMP/home"
 mkdir -p "$CLAUDE_CONFIG_DIR"
+
+# And the transcript side, for the same reason. Any check that forgets --root
+# would otherwise read whatever transcripts the developer happens to have: it
+# passes locally and fails in CI, where there are none, which is exactly how
+# the BOM check shipped green and went red on push. Pointing the default at an
+# empty directory makes that mistake loud and identical everywhere.
+export TS_TRANSCRIPT_DIR="$TMP/no-transcripts"
+mkdir -p "$TS_TRANSCRIPT_DIR"
 cleanup() { [[ $KEEP == 1 ]] || rm -rf "$TMP"; }
 trap cleanup EXIT
 
@@ -666,11 +674,21 @@ os.makedirs(broke, exist_ok=True)
 io.open(os.path.join(broke, ".claude.json"), "w").write("{ not json")
 env2 = dict(os.environ)
 env2["CLAUDE_CONFIG_DIR"] = broke
-adv = subprocess.run([ts, "advise", "--json"], env=env2, capture_output=True,
-                     text=True)
+# --root is essential, not incidental: with the default the subprocess reads
+# whatever transcripts the developer happens to have. Locally that passed; in
+# CI, where there are none, `advise` exits 1 with "no usable transcripts found"
+# and the check parsed an empty string into {} and reported the wrong failure.
+# Same lesson as #12 -- a test that depends on the machine running it.
+fleet_root = os.path.join(tmp, "chatter")
+adv = subprocess.run([ts, "advise", "--root", fleet_root, "--json"], env=env2,
+                     capture_output=True, text=True)
+if adv.returncode != 0:
+    bad.append("advise --json exited %d: %s"
+               % (adv.returncode, (adv.stderr or "").strip()[:120]))
 try:
     d = json.loads(adv.stdout)
 except Exception:
+    bad.append("advise --json produced no parseable output")
     d = {}
 if "mcp-schema" in (d.get("silent") or []):
     bad.append("mcp-schema is listed as silent though it could not be checked")
@@ -678,11 +696,15 @@ if "mcp-schema" not in {u["id"] for u in (d.get("unevaluated") or [])}:
     bad.append("mcp-schema is not reported as unevaluated: %r"
                % d.get("unevaluated"))
 
-sh = subprocess.run([ts, "share", "--show"], env=env2, capture_output=True,
-                    text=True)
+sh = subprocess.run([ts, "share", "--root", fleet_root, "--show"], env=env2,
+                    capture_output=True, text=True)
+if sh.returncode != 0:
+    bad.append("share --show exited %d: %s"
+               % (sh.returncode, (sh.stderr or "").strip()[:120]))
 try:
     prof = json.loads(sh.stdout)
 except Exception:
+    bad.append("share --show produced no parseable output")
     prof = {}
 found = {}
 for sec in prof.values():
