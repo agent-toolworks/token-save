@@ -37,8 +37,11 @@ def _render(findings, fleet, show_all: bool, blocked=(), only=None) -> None:
                                "see `ts advise --all` for the full catalogue"))
         return
 
+    # "largest single item" described the top of the list, and stopped being
+    # true once a located-cost finding could outrank every saving. It names
+    # the quantity now, so it is not read as a description of what follows.
     claimed = [f.saving_pct for f in findings if f.saving_pct is not None]
-    head_note = ("   largest single item: ~%.0f%% of spend" % max(claimed)
+    head_note = ("   largest single saving: ~%.0f%% of spend" % max(claimed)
                  if claimed else "   no saving claimed by any finding")
     print("\n  " + R.bold("%d of %d detectors fired" % (len(findings), len(advise.DETECTORS)))
           + R.dim(head_note))
@@ -97,9 +100,18 @@ def _render(findings, fleet, show_all: bool, blocked=(), only=None) -> None:
         for f in excluded:
             print("  " + R.dim("`%s` (%.1f%%) is the only finding — it "
                                "multiplies whatever else you fix rather than "
-                               "adding to it" % (f.id, f.saving_pct)))
+                               "adding to it" % (f.id, f.ranked_pct)))
 
+    # Two blocks, because a located share and a saveable share are not the
+    # same quantity and ordering them against each other put a MED above two
+    # HIGHs. Severity is comparable within a block and is not compared across.
+    shown_noclaim_header = False
     for i, f in enumerate(findings, 1):
+        if not f.claims_saving and not shown_noclaim_header:
+            shown_noclaim_header = True
+            print("\n" + R.rule())
+            print("  " + R.bold("cost located, no saving claimed")
+                  + R.dim("   these are not ranked against the savings above"))
         print("\n" + R.rule())
         head = "  %s  %s  %s" % (R.severity(f.severity), R.bold(f.title),
                                  R.dim("[" + f.id + "]"))

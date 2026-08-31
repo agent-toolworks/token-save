@@ -211,8 +211,21 @@ class Finding:
         return self.locates_pct or 0.0
 
     @property
+    def claims_saving(self) -> bool:
+        return self.saving_pct is not None
+
+    @property
     def rank(self) -> tuple:
-        return (-self.ranked_pct, self.id)
+        """Claimed savings first, each group ordered by its own quantity.
+
+        Ranking everything by ranked_pct put a MED that LOCATES 27.9% above two
+        HIGHs that SAVE 17.3% and 15.4% -- severity_for's docstring calls that
+        exact arrangement the thing it exists to prevent, and #30's fix and
+        #29's composed into it. 27.9% located and 17.3% saveable are not the
+        same kind of number, so they are not sorted against each other: the
+        report shows them as two blocks and compares within each.
+        """
+        return (0 if self.claims_saving else 1, -self.ranked_pct, self.id)
 
 
 # How findings relate to one another, declared ONCE per unordered pair.

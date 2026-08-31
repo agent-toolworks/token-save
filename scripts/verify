@@ -1048,6 +1048,76 @@ NOCLAIM
 [[ $noclaim == CLEAR ]] && ok "a finding may locate cost without claiming a saving, and is not read as zero" \
                         || bad "no-saving findings are read as measured zero" "${noclaim//|/$'\n        '}"
 
+# #31: severity and rank came apart. Two individually-correct changes composed
+# into the exact defect severity_for was written to prevent -- ranked_pct
+# orders a no-saving finding by what it LOCATES, evaluate() keeps its DECLARED
+# severity, and a MED then sorts above two HIGHs. severity_for's docstring:
+# "A reader cannot act on a ranking that disagrees with its own numbers, so the
+# two are now the same thing and a detector cannot set them apart."
+#
+# The existing check names this invariant and cannot reach it: its fixture has
+# no saving_pct=None finding, and its comparison raises TypeError on one. So
+# this constructs the arrangement -- and fails if it does not get it.
+sevord=$(python3 - "$ROOT" <<'SEVORD'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "lib"))
+import advise, machine
+from transcripts import Fleet, Session
+
+def sess(sid, turns, floor, sub=False, out=0):
+    s = Session(path="/x/%s.jsonl" % sid, project="-x", session_id=sid,
+                turns=turns, is_subagent=sub)
+    s.ctx_sizes = [floor + i * 5000 for i in range(5)]
+    s.billed["cache_read"] = turns * floor
+    s.billed["output"] = out
+    s.buckets["assistant text"] = out // 2
+    return s
+
+# Subagent-heavy, so subagent-cost fires and claims no saving.
+ss = [sess("m%d" % i, 60, 50_000, False, 40_000) for i in range(8)]
+ss += [sess("a%d" % i, 45, 28_000, True, 20_000) for i in range(9)]
+fs, _b = advise.evaluate(Fleet(sessions=ss), machine.collect())
+
+bad = []
+noclaim = [f for f in fs if f.saving_pct is None and f.locates_pct]
+if not noclaim:
+    bad.append("fixture built no finding that locates cost without claiming a "
+               "saving, so the composition under test does not occur here")
+if len(fs) < 3:
+    bad.append("fixture produced %d findings; too few to order" % len(fs))
+
+# Claimed savings first, then the located-cost block. A located share and a
+# saveable share are different quantities and are deliberately NOT ordered
+# against each other, so the invariant is asserted WITHIN each block -- across
+# them it would be asserting something the design does not claim, and would
+# pass or fail by luck depending on the fixture.
+claimed = [f for f in fs if f.claims_saving]
+noclaim_l = [f for f in fs if not f.claims_saving]
+if fs != claimed + noclaim_l:
+    bad.append("the two blocks are interleaved: %s"
+               % [(f.id, f.claims_saving) for f in fs])
+if not claimed:
+    bad.append("fixture built no finding that claims a saving, so the "
+               "cross-block arrangement under test does not occur here")
+
+RANKS = {"low": 1, "medium": 2, "high": 3}
+for label, block in (("claimed", claimed), ("located", noclaim_l)):
+    for a, b in zip(block, block[1:]):
+        if RANKS[b.severity] > RANKS[a.severity]:
+            bad.append("in the %s block, %s (%s, ranked %.2f) sits below %s "
+                       "(%s, ranked %.2f) -- severity disagrees with position"
+                       % (label, b.id, b.severity.upper(), b.ranked_pct,
+                          a.id, a.severity.upper(), a.ranked_pct))
+    for a, b in zip(block, block[1:]):
+        if b.ranked_pct > a.ranked_pct + 1e-9:
+            bad.append("in the %s block, %s (%.2f) sits below %s (%.2f)"
+                       % (label, b.id, b.ranked_pct, a.id, a.ranked_pct))
+print("|".join(bad) if bad else "CLEAR")
+SEVORD
+)
+[[ $sevord == CLEAR ]] && ok "severity agrees with position, including findings that claim no saving" \
+                       || bad "severity and rank disagree" "${sevord//|/$'\n        '}"
+
 # #28: the union ARITHMETIC was right and the SENTENCES were wrong, which is
 # why the check above did not catch either bug. A summary line read alone said
 # "taken together they are worth at least 1.3%" directly above a 15.3% finding,
