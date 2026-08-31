@@ -80,7 +80,12 @@ def _render(findings, fleet, show_all: bool, blocked=(), only=None) -> None:
               + R.bold("at least %.1f%%" % union)
               + R.dim(" of spend, excluding %s, which multiplies %s rather "
                       "than adding%s"
-                      % (", ".join("`%s` (%.1f%%)" % (f.id, f.saving_pct)
+                      # ranked_pct, not saving_pct: "%.1f" on a None is the
+                      # same TypeError that took `ts share` down in #33, and
+                      # this is the last place it could still happen. Not
+                      # reachable while session-length is the only exclusion
+                      # and always claims a saving.
+                      % (", ".join("`%s` (%.1f%%)" % (f.id, f.ranked_pct)
                                    for f in excluded),
                          "it" if len(addable) == 1 else "them", note)))
     elif union is not None and len(addable) > 1:

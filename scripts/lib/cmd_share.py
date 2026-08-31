@@ -34,6 +34,13 @@ from transcripts import (Fleet, quantile, tokenizer_name,  # noqa: E402
                          transcript_dir)
 
 # Bump on ANY change to a field name, a field type, or the MEANING of a value.
+# Schema 3: `saving_pct` became nullable and gained `locates_pct` and
+# `claims_saving` beside it (#30/#32). That is the same class of change as
+# `mcp_servers_configured` becoming nullable under schema 1, listed below --
+# and it is not merely additive: the SAME finding that reported 0.0 under
+# schema 2 reports null under 3, so a collection aggregating both would
+# average a measured zero together with an absent one. That is the #14
+# distinction, arriving in the profile.
 # Schema 1 covered three mutually incompatible shapes across v0.6.0-v0.11.0:
 # `mcp_servers` split into called/configured, `skills_tokens_on_disk` was
 # replaced by `skills_description_tokens` -- a different quantity, 484,371
@@ -65,7 +72,7 @@ def _tool_version() -> str:
         return "unknown"
 
 
-SCHEMA = 2
+SCHEMA = 3
 
 
 def _dist(values: list) -> dict:
@@ -186,7 +193,17 @@ def build(fleet: Fleet, mach: dict) -> dict:
         # Detector OUTCOMES, without the evidence lines — those quote paths.
         "findings": [
             {"id": f.id, "severity": f.severity, "confidence": f.confidence,
-             "saving_pct": round(f.saving_pct, 2)}
+             # Mirrors `advise --json` exactly, so the two machine-readable
+             # surfaces share one vocabulary and a consumer diffing profiles
+             # gets the same discriminator either way. round(None) crashed
+             # `ts share` outright from v0.19.0 through v0.21.0 -- the command
+             # for sending a profile upstream, so the failure landed on the
+             # person about to report something.
+             "claims_saving": f.claims_saving,
+             "saving_pct": (None if f.saving_pct is None
+                            else round(f.saving_pct, 2)),
+             "locates_pct": (None if f.locates_pct is None
+                             else round(f.locates_pct, 2))}
             for f in findings
         ],
         "silent": sorted(k for k in A.CATALOGUE

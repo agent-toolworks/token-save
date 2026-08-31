@@ -540,21 +540,57 @@ fi
 # `doctor` reads the present rather than a corpus and takes no --root, so it
 # is pointed at the hostile tree through TS_TRANSCRIPT_DIR, which is what
 # transcript_dir() honours. It was one of the four commands that died.
+# A corpus hostile in FINDING SHAPE, not in input shape. The hostile tree
+# below is malformed/truncated/oversized transcripts -- the regression this
+# check was written for -- and it produces nothing with saving_pct: None, so it
+# could not see `ts share` dying on round(None) across v0.19.0-v0.21.0 (#33).
+# Both corpora are run, rather than one replacing the other: the input-shape
+# coverage is still the reason the check exists.
+mkdir -p "$TMP/shapes/-x-repo/s-main/subagents"
+python3 - "$TMP/shapes/-x-repo" <<'SHAPES'
+import json, os, sys
+d = sys.argv[1]
+def write(path, turns, ctx, out):
+    with open(path, "w") as fh:
+        for _ in range(turns):
+            fh.write(json.dumps({"type": "assistant", "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "x " * 60}],
+                "usage": {"input_tokens": 0, "cache_creation_input_tokens": 0,
+                          "cache_read_input_tokens": ctx,
+                          "output_tokens": out}}}) + "\n")
+for i in range(6):
+    write(os.path.join(d, "s%d.jsonl" % i), 40, 50_000, 3_000)
+write(os.path.join(d, "s-main.jsonl"), 40, 50_000, 3_000)
+# Heavy enough that subagent-cost clears its gate and claims no saving.
+for i in range(8):
+    write(os.path.join(d, "s-main", "subagents", "a%d.jsonl" % i),
+          40, 40_000, 3_000)
+SHAPES
+
+# The corpus must actually contain the arrangement, or running against it
+# asserts nothing -- which is how this gap survived eight releases.
+if ! "$TS" advise --root "$TMP/shapes" --json 2>/dev/null      | grep -q '"saving_pct": null'; then
+  bad "the shape corpus produces no finding claiming no saving"       "the four-command smoke check cannot see a round(None) crash"
+fi
+
 ran=""
+for corpus in hostile shapes; do
 for cmd in audit advise doctor share; do
   # `share` writes ./ts-profile.json by default, so without --out a verify run
   # dirties the working tree -- and a `git add -A` then commits a profile of
   # whoever ran the tests. It did exactly that here.
   out=""
-  [[ $cmd == share ]] && out="--out $TMP/hostile-profile.json"
+  [[ $cmd == share ]] && out="--out $TMP/$corpus-profile.json"
   # shellcheck disable=SC2086
-  TS_TRANSCRIPT_DIR="$TMP/hostile" bounded 60 "$TS" "$cmd" $out \
-      >/dev/null 2>"$TMP/hostile.$cmd.err" || ran="$ran $cmd(exit)"
-  grep -qi traceback "$TMP/hostile.$cmd.err" && ran="$ran $cmd(traceback)"
+  TS_TRANSCRIPT_DIR="$TMP/$corpus" bounded 60 "$TS" "$cmd" $out \
+      >/dev/null 2>"$TMP/$corpus.$cmd.err" || ran="$ran $corpus/$cmd(exit)"
+  grep -qi traceback "$TMP/$corpus.$cmd.err" && ran="$ran $corpus/$cmd(traceback)"
 done
-[[ -z $ran ]] && ok "audit, advise, doctor and share all complete on a hostile corpus" \
-              || bad "commands still die on a hostile transcript" \
-                     "${ran# }$(printf '\n        '; head -3 "$TMP/hostile.${ran%%(*}.err" 2>/dev/null)"
+done
+[[ -z $ran ]] && ok "audit, advise, doctor and share complete on a malformed corpus AND one where a finding claims no saving" \
+              || bad "commands still die" \
+                     "${ran# }$(printf '\n        '; head -3 "$TMP/$(echo "${ran# }" | cut -d/ -f1).$(echo "${ran# }" | cut -d/ -f2 | cut -d'(' -f1).err" 2>/dev/null)"
 
 # Line endings. Python's text mode translates on read and writes "\n" back, so
 # both fixes converted a CRLF file wholesale -- and `terse-output`, because it
@@ -2349,7 +2385,7 @@ if r.returncode != 0:
     raise SystemExit(0)
 p = json.loads(r.stdout)
 
-EXPECTED_SCHEMA = 2
+EXPECTED_SCHEMA = 3
 EXPECTED = {
     None: ["amplification", "bash", "billed", "by_tool", "content",
            "content_total", "cost_units", "findings", "generated_by",
@@ -2366,11 +2402,28 @@ EXPECTED = {
     "billed": ["cache_read", "cache_write", "input", "output"],
     "session_shape": ["peak_context", "preamble", "turns"],
 }
+# The pin above covers the top level and the named sections, and did NOT cover
+# the keys inside `findings` -- so #30 could turn saving_pct nullable and #32
+# add two fields beside it with only the schema NUMBER catching it. A profile's
+# per-finding shape is the part a collection aggregates, so it is pinned too.
+EXPECTED_FINDING = ["claims_saving", "confidence", "id", "locates_pct",
+                    "saving_pct", "severity"]
 
 if p.get("schema") != EXPECTED_SCHEMA:
     bad.append("schema is %r, expected %d -- if the shape changed, the bump "
                "and this list must change together"
                % (p.get("schema"), EXPECTED_SCHEMA))
+for _f in (p.get("findings") or []):
+    if sorted(_f) != sorted(EXPECTED_FINDING):
+        bad.append("findings[] fields changed: +%s -%s -- bump SCHEMA and "
+                   "update the pinned list"
+                   % (sorted(set(_f) - set(EXPECTED_FINDING)),
+                      sorted(set(EXPECTED_FINDING) - set(_f))))
+        break
+if not p.get("findings"):
+    bad.append("the profile carries no findings, so the per-finding shape is "
+               "unpinned")
+
 for section, want in EXPECTED.items():
     got = sorted(p if section is None else (p.get(section) or {}))
     if got != sorted(want):
