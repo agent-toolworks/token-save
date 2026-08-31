@@ -951,14 +951,77 @@ if total < largest - 1e-9:
     bad.append("union %.2f is below the largest single finding %.2f"
                % (total, largest))
 
-# An empty report must not produce a total.
-if advise.union_lower_bound([])[0] != 0:
-    bad.append("union is non-zero with no findings")
+# #28: `0` said "no saving available" while the report carried a 24% finding.
+# Not computed and measured zero may not share a representation (#14).
+only_excluded = [F("session-length", 20.0)]
+total3, groups3 = advise.union_lower_bound(only_excluded)
+if total3 is not None:
+    bad.append("union is %r when only a union-excluded finding fired; it must "
+               "be None, since 0 reads as 'nothing to save'" % total3)
+if groups3:
+    bad.append("union groups %s with nothing addable" % groups3)
+if advise.union_lower_bound([])[0] is not None:
+    bad.append("union is not None with no findings at all")
+
+# The bound that the previous check missed. It compared against the largest of
+# a fixture with no excluded member, so the case where the EXCLUDED finding is
+# the largest -- the one that shipped -- was never covered.
+big_excluded = [F("bash-chatter", 1.3), F("session-length", 15.3)]
+tot4, _g4 = advise.union_lower_bound(big_excluded)
+if tot4 is None or tot4 >= 15.3:
+    bad.append("fixture does not reproduce a union below the largest finding")
 print("|".join(bad) if bad else "CLEAR")
 UNI
 )
 [[ $uni == CLEAR ]] && ok "the union is a floor: overlaps counted once, disjoint added, session-length out" \
                     || bad "union arithmetic is wrong" "${uni//|/$'\n        '}"
+
+# #28: the union ARITHMETIC was right and the SENTENCES were wrong, which is
+# why the check above did not catch either bug. A summary line read alone said
+# "taken together they are worth at least 1.3%" directly above a 15.3% finding,
+# and a one-finding report said "do not add these percentages together" and
+# "overlaps all of the above" with nothing above it. These assert the rendered
+# text, against a real fleet, through the actual command.
+say=$(python3 - "$ROOT" "$TMP" <<'SAY'
+import os, re, subprocess, sys
+root, tmp = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+env = dict(os.environ)
+bad = []
+
+def run(*args):
+    r = subprocess.run([ts, "advise", "--root", os.path.join(tmp, "bulk")]
+                       + list(args), env=env, capture_output=True, text=True)
+    return r.stdout or ""
+
+# A lone union-excluded finding: nothing to add, nothing above it.
+one = run("--only", "session-length")
+if "do not add these percentages together" in one:
+    bad.append("one finding is still told not to be added to itself")
+if "all of the above" in one:
+    bad.append("'all of the above' printed with nothing above it")
+if re.search(r"at least\s+0\.0%", one):
+    bad.append("union rendered as 0.0% when nothing was addable")
+
+# Where the excluded finding is the LARGEST, the number must not be able to
+# read as the total: the exclusion is named in the same sentence.
+two = run("--only", "session-length,bash-chatter")
+for line in two.splitlines():
+    if "at least" in line and "%" in line:
+        m = re.search(r"at least\s+([\d.]+)%", line)
+        if m and "excluding" not in line and "session-length" not in line:
+            bad.append("summary line states %s%% without naming the exclusion "
+                       "on the same line: %r" % (m.group(1), line.strip()))
+
+# A report with no excluded finding keeps the plain wording.
+three = run("--only", "preamble,attachments")
+if "at least" in three and "excluding" in three:
+    bad.append("plain report names an exclusion that did not fire")
+print("|".join(bad) if bad else "CLEAR")
+SAY
+)
+[[ $say == CLEAR ]] && ok "the union summary never reads as a total it is not" \
+                    || bad "union summary line is misleading" "${say//|/$'\n        '}"
 
 # A byte-order mark is invisible in most editors, Windows writes one by
 # default, and json.load under plain utf-8 rejects it -- so a valid config was

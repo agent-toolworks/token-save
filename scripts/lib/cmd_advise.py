@@ -40,27 +40,47 @@ def _render(findings, fleet, show_all: bool, blocked=(), only=None) -> None:
     top = max(f.saving_pct for f in findings)
     print("\n  " + R.bold("%d of %d detectors fired" % (len(findings), len(advise.DETECTORS)))
           + R.dim("   largest single item: ~%.0f%% of spend" % top))
-    print("  " + R.dim("findings overlap — do not add these percentages together"))
+    excluded = [f for f in findings if f.id in advise.UNION_EXCLUDED]
+    union, groups = advise.union_lower_bound(findings)
+
+    # Both of these need a second finding to be true. With one finding the
+    # report was telling a reader not to add a single number together, and
+    # describing it as overlapping "all of the above" with nothing above it.
+    if len(findings) > 1:
+        print("  " + R.dim("findings overlap — do not add these percentages "
+                           "together"))
 
     # Saying only what NOT to compute left the reader with eight numbers, a
     # warning, and no total. The floor counts each overlapping group once, so
     # it is what the findings are worth together AT LEAST.
-    union, groups = advise.union_lower_bound(findings)
-    if union:
-        merged = [g for g in groups if len(g) > 1]
-        note = ("; %s counted once" % ", ".join("+".join(g) for g in merged)
-                if merged else "")
+    merged = [g for g in groups if len(g) > 1]
+    note = ("; %s counted once" % ", ".join("+".join(g) for g in merged)
+            if merged else "")
+    if union is not None and excluded:
+        # The exclusion is named in the SAME sentence as the number, not on the
+        # line below it. "taken together they are worth at least 1.3%" sat
+        # directly above a 15.3% finding and reads as the total opportunity --
+        # and the summary is the part written to be read alone.
+        print("  " + R.dim("the addable findings are worth ")
+              + R.bold("at least %.1f%%" % union)
+              + R.dim(" of spend, excluding %s, which multiplies them rather "
+                      "than adding%s"
+                      % (", ".join("`%s` (%.1f%%)" % (f.id, f.saving_pct)
+                                   for f in excluded), note)))
+    elif union is not None:
         print("  " + R.dim("taken together they are worth ")
               + R.bold("at least %.1f%%" % union)
               + R.dim(" of spend%s" % note))
-    excluded = [f for f in findings if f.id in advise.UNION_EXCLUDED]
-    for f in excluded:
-        # Left out of the sum rather than folded in: it overlaps every other
-        # finding, so grouping it honestly would collapse the union to this one
-        # number and report the largest finding as the total.
-        print("  " + R.dim("`%s` (%.1f%%) overlaps all of the above — a "
-                           "multiplier on what remains, not an addition"
-                           % (f.id, f.saving_pct)))
+
+    # Only when the union sentence above did not already name it. Left out of
+    # the sum rather than folded in: it overlaps every other finding, so
+    # grouping it honestly would collapse the union to this one number and
+    # report the largest finding as the total.
+    if union is None:
+        for f in excluded:
+            print("  " + R.dim("`%s` (%.1f%%) is the only finding — it "
+                               "multiplies whatever else you fix rather than "
+                               "adding to it" % (f.id, f.saving_pct)))
 
     for i, f in enumerate(findings, 1):
         print("\n" + R.rule())
@@ -176,7 +196,7 @@ def main(argv=None) -> int:
         blocked = [u for u in blocked if u.id in only]
         silent_ids = [k for k in silent_ids if k in only]
 
-    _union_total, _union_groups = advise.union_lower_bound(findings)
+    union, groups = advise.union_lower_bound(findings)
     if args.json:
         print(json.dumps({
             "tokenizer": tokenizer_name(),
@@ -188,8 +208,9 @@ def main(argv=None) -> int:
             # so the real union is at least this. `excluded` names what was
             # left out and why, so a consumer is not silently handed a total
             # that quietly omits the largest lever.
-            "union_lower_bound_pct": round(_union_total, 2),
-            "union_groups": _union_groups,
+            "union_lower_bound_pct": (None if union is None
+                                      else round(union, 2)),
+            "union_groups": groups,
             "union_excluded": [f.id for f in findings
                                if f.id in advise.UNION_EXCLUDED],
             "findings": [{

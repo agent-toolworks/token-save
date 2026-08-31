@@ -281,7 +281,11 @@ def union_lower_bound(findings) -> tuple:
     without further qualification.
 
     Returns (total, groups) where groups is [[ids...]] as counted, largest
-    contribution first.
+    contribution first. `total` is None -- not 0 -- when there is nothing
+    addable to total, which happens when the only findings are union-excluded.
+    Zero would say "no saving available" while the report carries a finding
+    worth 24%; that is the measured-zero versus not-computed distinction from
+    #14, and the two may not share a representation.
     """
     pool = [f for f in findings if f.id not in UNION_EXCLUDED]
     by_id = {f.id: f for f in pool}
@@ -307,6 +311,8 @@ def union_lower_bound(findings) -> tuple:
     groups = {}
     for fid in by_id:
         groups.setdefault(find(fid), []).append(fid)
+    if not pool:
+        return None, []
     counted = sorted(
         ([sorted(ids), max(by_id[i].saving_pct for i in ids)]
          for ids in groups.values()),
