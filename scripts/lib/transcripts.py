@@ -750,6 +750,21 @@ class Fleet:
         """Attachment record counts by type."""
         return self.merged("attach_counts")
 
+    def attach_median_per_session(self) -> dict:
+        """Median tokens per session for each attachment type.
+
+        Over the sessions that carry the type at all, not over every session:
+        the once-per-session listings arrive at ~1.0 per session, and averaging
+        them across sessions that predate the feature would understate what a
+        session actually pays today.
+        """
+        per = {}
+        for sess in self.sessions:
+            for t, n in sess.attach_types.items():
+                if n:
+                    per.setdefault(t, []).append(n)
+        return {t: quantile(sorted(v), 0.5) for t, v in per.items()}
+
     def attach_families(self) -> dict:
         """Attachment tokens grouped into the four cost sources plus unknowns."""
         out = {}

@@ -14,8 +14,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from transcripts import BUCKET_ASSISTANT, toks  # noqa: E402
 
 CLAUDE_HOME = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude"))
 CLAUDE_JSON = os.path.expanduser("~/.claude.json")
@@ -39,9 +45,15 @@ def _read_json(path):
 
 
 def _size_tokens(path) -> int:
-    """Approximate token size of a text file (len/3.6, see transcripts.py)."""
+    """Approximate token size of a text file.
+
+    Sized as prose rather than with the global constant: these are CLAUDE.md
+    and SKILL.md, which are markdown written in sentences, and the per-class
+    divisor for prose is 4.06 against a global 3.6 — a 13% overstatement if the
+    generic one is used. See the estimator note in transcripts.py.
+    """
     try:
-        return int(os.path.getsize(path) / 3.6)
+        return toks("x" * os.path.getsize(path), BUCKET_ASSISTANT)
     except OSError:
         return 0
 
@@ -65,7 +77,8 @@ def _walk_tokens(root, exts=(".md",)) -> tuple:
 def memory_footprint(cwd: str = None) -> dict:
     """Everything that gets injected into every session's preamble."""
     cwd = cwd or os.getcwd()
-    out = {"files": [], "total": 0}
+    out = {"files": [], "total": 0, "projects": {}, "always": 0,
+           "project_median": 0, "per_session": 0}
 
     candidates = [
         os.path.join(CLAUDE_HOME, "CLAUDE.md"),
@@ -79,26 +92,79 @@ def memory_footprint(cwd: str = None) -> dict:
             out["files"].append((p, t))
             out["total"] += t
 
-    # Per-project auto-memory directories (this harness writes one per project).
+    # Everything above loads in EVERY session. Per-project auto-memory does
+    # not: one project's directory loads, not all of them. Summing them into
+    # one figure overstates what any single session pays -- 10,852 tokens here
+    # against 1,084 for the project this was run from -- and that figure is
+    # used to attribute the preamble, where an overstatement lands on the
+    # advice. So they are kept apart, and `per_session` is what a session
+    # actually carries.
+    out["always"] = out["total"]
     mem_root = os.path.join(CLAUDE_HOME, "projects")
     if os.path.isdir(mem_root):
-        for proj in os.listdir(mem_root):
+        for proj in sorted(os.listdir(mem_root)):
             d = os.path.join(mem_root, proj, "memory")
             if os.path.isdir(d):
-                t, files = _walk_tokens(d)
+                t, _files = _walk_tokens(d)
                 if t:
                     out["files"].append((d + "/*.md", t))
+                    out["projects"][proj] = t
+                    # `total` stays the sum of everything on disk, which is what
+                    # `ts doctor` and `ts share` have always reported.
                     out["total"] += t
+    projs = sorted(out["projects"].values())
+    # Median rather than the cwd's: a report covering many projects is
+    # describing a typical session, not the one this shell happens to be in.
+    out["project_median"] = projs[len(projs) // 2] if projs else 0
+    out["per_session"] = out["always"] + out["project_median"]
     out["files"].sort(key=lambda x: -x[1])
     return out
 
 
+def _description_tokens(path) -> int:
+    """Tokens in a SKILL.md's frontmatter `description`, and nothing else.
+
+    Only the description loads up front — the body is read when the skill
+    fires. Pricing the whole file overstates the preamble by a large factor and
+    would point a reader at the wrong fix, which is the specific mistake #2
+    warns about.
+    """
+    try:
+        with open(path, "r", errors="replace") as fh:
+            head = fh.read(16384)
+    except OSError:
+        return 0
+    if not head.startswith("---"):
+        return 0
+    end = head.find("\n---", 3)
+    front = head[3:end] if end > 0 else head[3:]
+    grabbed, taking = [], False
+    for line in front.splitlines():
+        if re.match(r"^description\s*:", line):
+            taking = True
+            grabbed.append(line.split(":", 1)[1])
+            continue
+        if taking:
+            # A folded YAML scalar continues until the next top-level key.
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_-]*\s*:", line):
+                break
+            grabbed.append(line)
+    text = " ".join(x.strip() for x in grabbed).strip()
+    return toks(text, BUCKET_ASSISTANT) if text else 0
+
+
 def skills_footprint() -> dict:
     """Installed skills. Only descriptions load up front, but a skill with a
-    bloated description is paid for in every session whether used or not."""
+    bloated description is paid for in every session whether used or not.
+
+    `total` is the whole-file size and is NOT what the preamble pays;
+    `desc_total` is. Both are reported because the gap between them is the
+    reason to look: a 40x ratio means the descriptions are fine and the bodies
+    are large, which costs nothing until a skill fires.
+    """
     roots = [os.path.join(CLAUDE_HOME, "skills"),
              os.path.join(CLAUDE_HOME, "plugins")]
-    total, found = 0, []
+    total, desc_total, found = 0, 0, []
     for r in roots:
         if not os.path.isdir(r):
             continue
@@ -106,10 +172,13 @@ def skills_footprint() -> dict:
             if "SKILL.md" in names:
                 p = os.path.join(dirpath, "SKILL.md")
                 t = _size_tokens(p)
+                d = _description_tokens(p)
                 total += t
-                found.append((p, t))
+                desc_total += d
+                found.append((p, d))
     found.sort(key=lambda x: -x[1])
-    return {"count": len(found), "total": total, "files": found}
+    return {"count": len(found), "total": total, "desc_total": desc_total,
+            "files": found}
 
 
 def mcp_servers() -> dict:

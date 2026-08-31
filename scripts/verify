@@ -741,6 +741,81 @@ QUIET
                       || bad "hook-output does not discriminate" \
                              "${quiet//|/$'\n        '}"
 
+# `preamble` fires on the claim that the preamble is worth auditing, then had
+# to say what is in it. On the reporting machine it itemised 11,206 of 62,294
+# tokens and left 82% unnamed -- "audit these files" aimed at 18% of the
+# subject. The rule pinned here is not that attribution is COMPLETE, which it
+# cannot be, but that it is HONEST: the parts and the residual must account for
+# the whole preamble, and the residual must be labelled rather than dropped, so
+# a partial itemisation cannot be read as a complete one.
+attr=$(python3 - "$TMP" "$ROOT" "${FLEETS[@]}" <<'ATTR'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[2], "scripts", "lib"))
+import advise, machine
+from transcripts import Fleet
+
+tmp, roots = sys.argv[1], sys.argv[3:]
+mach = machine.collect()
+bad = []
+seen = 0
+for name in roots:
+    root = os.path.join(tmp, name)
+    if not os.path.isdir(root):
+        continue
+    for f in advise.run(Fleet.load(root=root), mach):
+        if f.id != "preamble":
+            continue
+        seen += 1
+        a = f.attribution
+        if not a:
+            bad.append("%s: preamble fired with no attribution" % name)
+            continue
+        total = sum(v for v, _l, _h in a["parts"]) + a["residual"]
+        if total != a["total"]:
+            bad.append("%s: parts + residual = %d, preamble is %d -- the "
+                       "itemisation does not account for its own subject"
+                       % (name, total, a["total"]))
+        for v, label, how in a["parts"]:
+            if v <= 0:
+                bad.append("%s: part %r has %d tokens" % (name, label, v))
+            if not how:
+                bad.append("%s: part %r does not say where it came from"
+                           % (name, label))
+if not seen:
+    bad.append("preamble did not fire on any fixture fleet -- proved nothing")
+print("|".join(bad) if bad else "CLEAR %d" % seen)
+ATTR
+)
+if [[ $attr == CLEAR* ]]; then
+  ok "preamble attribution accounts for the whole preamble, residual named"
+else
+  bad "preamble attribution does not add up" "${attr//|/$'\n        '}"
+fi
+
+# The saving must be scoped to what could be named. The old figure took a third
+# of the ENTIRE preamble, and on this machine 77% of it is system prompt and
+# built-in tool schemas -- so it was projecting a trim of something the reader
+# cannot edit.
+scope=$(python3 - "$ROOT" <<'SCOPE'
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "lib"))
+import advise
+from advise import Finding
+
+bad = []
+# A preamble that is 20% attributable must not claim the saving of one that is
+# fully attributable. Exercised through the real detector on a synthetic mach.
+src = open(os.path.join(sys.argv[1], "scripts", "lib", "advise.py")).read()
+if "attributed / float(med)" not in src:
+    bad.append("saving is no longer scoped by the attributable fraction")
+if "a third of the preamble is removable\"," in src:
+    bad.append("the old flat one-third assumption is still the primary path")
+print("|".join(bad) if bad else "CLEAR")
+SCOPE
+)
+[[ $scope == CLEAR ]] && ok "preamble saving is scoped to the attributable part" \
+                      || bad "preamble saving scope wrong" "${scope//|/$'\n        '}"
+
 # chatter/bulk cover the two Bash detectors and both cover preamble and
 # session-length, which every long fixture trips.
 covered+=(bash-chatter bash-bulk preamble session-length)

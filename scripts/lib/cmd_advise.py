@@ -116,6 +116,13 @@ def main(argv=None) -> int:
                 "confidence": f.confidence,
                 "saving_pct": round(f.saving_pct, 2),
                 "assumption": f.assumption,
+                "attribution": None if not f.attribution else {
+                    "total": f.attribution["total"],
+                    "residual": f.attribution["residual"],
+                    "unattributed": f.attribution["unattributed"],
+                    "parts": [{"tokens": v, "label": l, "source": h}
+                              for v, l, h in f.attribution["parts"]],
+                },
                 "gate": None if not f.gate else {
                     "mode": f.gate.mode,
                     "margin": (None if f.gate.margin is None

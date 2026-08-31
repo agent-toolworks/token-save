@@ -162,6 +162,11 @@ class Finding:
     # fire must declare one; verify asserts the declared gate agrees with the
     # code path by checking that anything which fired has margin >= 1.
     gate: Gate = None
+    # Where a finding can decompose its own subject, the decomposition travels
+    # with it: {"total", "parts": [(tokens, label, how)], "unattributed"}. A
+    # partial itemisation read as a complete one is the failure #2 describes,
+    # so the residual is part of the structure rather than a rendering detail.
+    attribution: dict = None
 
     @property
     def rank(self) -> tuple:
@@ -186,6 +191,48 @@ def severity_for(saving_pct: float) -> str:
 # ---------------------------------------------------------------------------
 # detectors
 # ---------------------------------------------------------------------------
+
+def _preamble_actions(parts, residual, med, sk) -> list:
+    """Advice aimed at whatever is actually largest, not at a fixed list.
+
+    The old action list opened with "audit the files above" on every machine,
+    including ones where those files were a fifth of the preamble. Which lever
+    is worth pulling depends on the split, so the split chooses.
+    """
+    ranked = sorted(parts, key=lambda r: -r[0])
+    top = ranked[0][1] if ranked else None
+    out = []
+    if top == "memory/instruction files":
+        out.append("Memory files are the largest part of your preamble. Move "
+                   "rarely-needed detail out of CLAUDE.md into a skill or a doc "
+                   "the agent reads on demand — instructions that fire on 5% of "
+                   "turns should not be in 100% of them. `ts doctor --memory` "
+                   "lists them by size.")
+    elif top == "skill descriptions":
+        out.append("Skill descriptions are the largest part of your preamble: "
+                   "{:,} tokens across {} installed skills, paid every session "
+                   "whether a skill fires or not. Trim them to their trigger "
+                   "phrases, or uninstall what you do not use.".format(
+                       ranked[0][0], sk.get("count", 0)))
+    elif top in ("deferred tool definitions", "MCP server instructions"):
+        out.append("Tool and MCP definitions are the largest part of your "
+                   "preamble. Removing an unused server removes its whole "
+                   "block — see `mcp-schema`, which lists the ones you never "
+                   "call.")
+    elif top == "agent listings":
+        out.append("Agent listings are the largest part of your preamble. "
+                   "Every installed agent's description is loaded up front; "
+                   "remove the ones you do not dispatch to.")
+    if residual > 0 and pct(residual, med) >= 50:
+        out.append("{:.0f}% of the preamble is unattributed — the system prompt "
+                   "and built-in tool schemas, which you cannot edit. That is "
+                   "the floor, and it means the editable part is the {:.0f}% "
+                   "above it.".format(pct(residual, med),
+                                      100 - pct(residual, med)))
+    out.append("Re-run `ts audit` after a change: the preamble is measured, so "
+               "a trim shows up as a smaller floor rather than as a hope.")
+    return out
+
 
 def d_preamble(fleet, mach):
     """The fixed prompt is re-read on every single turn, so it is the one place
@@ -212,14 +259,65 @@ def d_preamble(fleet, mach):
           "re-read on every one of {:,} turns = {:,} cache-read tokens".format(
               fleet.turns(), cost),
           "that is {:.1f}% of all cache reads you were billed for".format(share)]
+
+    # A finding whose premise is that the preamble is worth auditing has to say
+    # what is in it. On the reporting machine it itemised 11,206 of 62,294
+    # tokens and left 82% unattributed -- "audit these files" aimed at 18% of
+    # the thing. The harness's own listings are the missing bulk, and they are
+    # MEASURED from the transcript rather than estimated from disk.
     mem = mach["memory"]
-    if mem["total"]:
-        ev.append("memory/instruction files total ~{:,} tokens:".format(mem["total"]))
-        for p, t in mem["files"][:4]:
-            ev.append("    {:>7,}  {}".format(t, p.replace(os.path.expanduser("~"), "~")))
     sk = mach["skills"]
+    per_sess = fleet.attach_median_per_session()
+    LISTINGS = [
+        ("skill_listing", "skill descriptions"),
+        ("deferred_tools_delta", "deferred tool definitions"),
+        ("agent_listing_delta", "agent listings"),
+        ("mcp_instructions_delta", "MCP server instructions"),
+        ("nested_memory", "nested memory files"),
+    ]
+    parts = []
+    if mem.get("per_session"):
+        parts.append((mem["per_session"], "memory/instruction files",
+                      "on disk, always-loaded + median project"))
+    measured_skills = per_sess.get("skill_listing", 0)
+    for key, label in LISTINGS:
+        v = per_sess.get(key, 0)
+        if v:
+            parts.append((v, label, "measured, once per session"))
+    # Fall back to the disk estimate only where the transcripts carry no
+    # listing record -- an older Claude Code, or a version that names it
+    # something this release does not know.
+    if not measured_skills and sk.get("desc_total"):
+        parts.append((sk["desc_total"], "skill descriptions",
+                      "estimated from %d SKILL.md frontmatter(s)" % sk["count"]))
+
+    attributed = sum(v for v, _l, _h in parts)
+    residual = med - attributed
+    ev.append("what is in that {:,}, per session:".format(med))
+    for v, label, how in sorted(parts, key=lambda r: -r[0]):
+        ev.append("    {:>7,}  {:>3.0f}%  {:<26} {}".format(
+            v, pct(v, med), label, how))
+    if residual > 0:
+        ev.append("    {:>7,}  {:>3.0f}%  {:<26} {}".format(
+            residual, pct(residual, med), "unattributed",
+            "system prompt and built-in tool schemas"))
+    elif attributed:
+        # Say so rather than showing a negative or silently clamping. The
+        # listings are medians over the sessions that carry them and the
+        # preamble is a median over all of them; on a machine that changed
+        # configuration mid-corpus the two can cross.
+        ev.append("    the itemisation exceeds the measured preamble by {:,} "
+                  "tokens — these are medians over different session sets, so "
+                  "treat the split as indicative".format(-residual))
+
+    for pth, t in mem["files"][:4]:
+        ev.append("      {:>7,}  {}".format(
+            t, pth.replace(os.path.expanduser("~"), "~")))
     if sk["count"]:
-        ev.append("{} installed skills; descriptions load up front".format(sk["count"]))
+        ev.append("{} installed skills; only the frontmatter descriptions load "
+                  "up front (~{:,} tokens on disk, against {:,} of whole "
+                  "SKILL.md files)".format(sk["count"], sk.get("desc_total", 0),
+                                           sk["total"]))
 
     # Only the read-multiplied share is recoverable, and only partly: a trim of
     # a third of the preamble is an aggressive but achievable target.
@@ -227,17 +325,35 @@ def d_preamble(fleet, mach):
         id="preamble",
         title="Fixed preamble is re-read every turn",
         severity=sev, confidence="estimated",
-        assumption="a third of the preamble is removable",
-        saving_pct=to_spend(fleet, share) * 0.33,
+        assumption=(
+            "a third of the %s tokens that could be attributed is removable; "
+            "the %.0f%% that could not is not counted as recoverable"
+            % ("{:,}".format(attributed), pct(residual, med))
+            if attributed else
+            "a third of the preamble is removable — nothing in it could be "
+            "attributed to a source, so this is the old flat assumption"),
+        # Only the part that can be NAMED is counted as recoverable. The old
+        # number took a third of the whole preamble, including a residual that
+        # is mostly system prompt and built-in tool schemas -- and on this
+        # machine that residual is 77%, so the old figure was projecting a trim
+        # of something the reader cannot edit. Where nothing can be attributed
+        # the flat assumption is kept rather than silently reporting zero.
+        saving_pct=(to_spend(fleet, share * attributed / float(med)) * 0.33
+                    if attributed and med else to_spend(fleet, share) * 0.33),
         gate=gate,
+        attribution={"total": med,
+                     "parts": [(v, l, h) for v, l, h in parts],
+                     # Exact, so parts + residual == total always. Positive is
+                     # what could not be attributed; NEGATIVE means the
+                     # itemisation overshoots, which happens when the listing
+                     # medians and the preamble median come from different sets
+                     # of sessions. Clamping it to zero would balance the
+                     # display while breaking the arithmetic, which is the
+                     # dishonesty this whole change is about.
+                     "residual": residual,
+                     "unattributed": max(0, residual)},
         evidence=ev,
-        actions=[
-            "Audit the files above: `ts doctor --memory` lists them by size.",
-            "Move rarely-needed detail out of CLAUDE.md into a skill or a doc "
-            "the agent can read on demand. Instructions that fire on 5% of "
-            "turns should not be in 100% of them.",
-            "Trim skill descriptions to their trigger phrases.",
-        ])
+        actions=_preamble_actions(parts, residual, med, sk))
 
 
 def d_session_length(fleet, mach):
