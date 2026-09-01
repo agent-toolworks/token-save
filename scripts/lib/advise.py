@@ -304,6 +304,51 @@ def stored_output(fleet) -> int:
 UNION_EXCLUDED = ("session-length",)
 
 
+# Why there is no compound "if you did all of this" figure.
+#
+# #28 declined `union + session_length * (1 - union)` for needing an
+# independence assumption nobody had measured. It has since been measured, on
+# an outside corpus of 298 substantive sessions, by replaying the midpoint
+# split against real per-turn ctx_sizes rather than against the formula. The
+# result is sharper than the question asked for: it is not one assumption but
+# two, pulling opposite ways, and they very nearly cancel.
+#
+#   shrink the fixed floor    the absolute saving does not move at all. A
+#                             smaller preamble shifts every turn by the same
+#                             constant, which cancels in the split arithmetic;
+#                             splitting saves the re-reading of ACCUMULATED
+#                             content, and the preamble is re-read either way.
+#                             Only the denominator falls, so the share rises:
+#                             +7.4% at a 25% cut.
+#   shrink accumulated
+#   content                   the saving is the thing being cut, and it falls
+#                             slightly faster than the denominator because the
+#                             floor stays in it: -7.8% at a 25% cut.
+#   both at 25%               +0.71%. About +/-2.8% per 10 points either way.
+#
+# So the error is bounded and its SIGN is decidable at print time: a
+# floor-dominated union makes the compound conservative, a content-dominated
+# one makes it overstate. Publishing it only when floor >= content would be
+# defensible, and it is still not published, for reasons that are about this
+# codebase rather than about the arithmetic:
+#
+#   - it needs a floor/content/neither label per detector, maintained in step
+#     with them. reasoning-cost belongs to NEITHER -- thinking never enters the
+#     transcript, so it is never re-read and moves neither side -- and the
+#     analysis that produced these numbers had it filed under content until it
+#     was checked. A label that subtle, kept by hand, is the RELATIONS drift
+#     of #27 waiting to happen.
+#   - the precondition FAILS on the development machine, which is
+#     content-dominated at 0.6:1 against the reporting machine's 3.5:1. A
+#     figure that never renders where it is developed is how `ts share` stayed
+#     broken for three releases (#33).
+#   - the union and session-length are both already printed. The compound adds
+#     one number, and the report's job is to be trusted rather than complete.
+#
+# Recorded here rather than in a closed ticket: the next person to reach for
+# this should start from the measurement, not from the question.
+
+
 def union_lower_bound(findings) -> tuple:
     """A conservative floor on what the findings are worth together.
 
@@ -665,6 +710,14 @@ def d_session_length(fleet, mach):
         F, P = float(h.floor or 0), float(h.peak or 0)
         if F > 0 and P > F:
             saved_reads += h.billed["cache_read"] * ((P - F) / (2.0 * (F + P)))
+    # F -> P linear is an approximation of a session's real per-turn shape.
+    # Replayed against actual ctx_sizes on an outside corpus -- 74 heavy
+    # sessions, second half restarted at the floor and re-accumulated -- it
+    # overstates by 4.6%: 2,249,909,985 against 2,151,730,189 cache reads. Same
+    # direction on every heavy session there, so it is the approximation rather
+    # than noise, and it is named in the assumption line rather than corrected:
+    # the replay is a per-turn pass for a number the caveat already calls
+    # directional, and this detector carries most of the report's headline.
     derived_pct = to_spend(fleet, pct(saved_reads, all_reads)) if all_reads else 0.0
     ev.append("splitting the heaviest {} session(s) in half would cut ~{:,} "
               "cache-read tokens = about {:.0f}% of total spend, from their own "
@@ -677,7 +730,9 @@ def d_session_length(fleet, mach):
         severity=sev, confidence="derived",
         assumption="each heavy session split once at its midpoint; only "
                    "cache reads shrink, output is unchanged and the split "
-                   "adds one preamble write, which is not subtracted",
+                   "adds one preamble write, which is not subtracted; the "
+                   "linear floor-to-peak shape overstates by ~5% against a "
+                   "per-turn replay, so this errs high",
         saving_pct=derived_pct,
         gate=gate,
         evidence=ev,
