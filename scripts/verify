@@ -1248,48 +1248,97 @@ for name in os.listdir(lib):
     if not name.endswith(".py"):
         continue
     src = open(os.path.join(lib, name)).read()
-    if "json.dumps(" in src and re.search(r"args\.json|--json|--show", src):
+    # json.dump( without the trailing s writes to a file object and is a
+    # coin-flip while writing; --out is not hypothetical, it is the flag
+    # `share` already uses. Both slipped the first version of this scan.
+    if re.search(r"json\.dumps?\(", src) and re.search(
+            r"args\.json|--json|--show|--out", src):
         emitters.add(name[:-3])
-KNOWN = {"audit": ["audit", "--root", os.path.join(tmp, "bulk"), "--json"],
-         "cmd_advise": ["advise", "--root", os.path.join(tmp, "bulk"), "--json"],
-         "cmd_now": ["now", "--session", os.path.join(tmp, "bulk", "proj-bulk")],
-         "cmd_doctor": ["doctor", "--json"],
-         "cmd_share": ["share", "--root", os.path.join(tmp, "bulk"), "--show"]}
-missing = emitters - set(KNOWN)
-if missing:
-    bad.append("%s emit JSON and are not covered here; add them or the field "
-               "can be omitted from a new surface unnoticed" % sorted(missing))
+# module -> subcommand, read from `ts`'s own dispatch, so the two layers meet
+# without a table maintained by hand. The first version of this check carried
+# one, which is the other thing that drifts.
+ts_src = open(ts).read()
+dispatch = {}
+pending = None
+for line in ts_src.splitlines():
+    m = re.match(r"^\s{2}([a-z][a-z-]*)\)\s*$", line)
+    if m:
+        pending = m.group(1)
+    m = re.search(r"\$LIB/([a-z_]+)\.py", line)
+    if m and pending:
+        dispatch.setdefault(m.group(1), pending)
 
-for name, argv in KNOWN.items():
-    if name == "cmd_now":
-        sess = None
-        for dirpath, _d, files in os.walk(os.path.join(tmp, "bulk")):
-            for f in files:
-                if f.endswith(".jsonl"):
-                    sess = os.path.join(dirpath, f)
-                    break
-            if sess:
-                break
-        if not sess:
-            bad.append("no transcript to run `ts now` against")
-            continue
-        argv = ["now", "--session", sess, "--json"]
-    r = subprocess.run([ts] + argv, env=env, capture_output=True, text=True)
-    try:
-        d = json.loads(r.stdout)
-    except Exception:
-        bad.append("%s: --json did not parse (exit %d)" % (name, r.returncode))
+
+# The scan above asserts what the SOURCE LOOKS LIKE, which is the thing every
+# other check in this suite stopped doing. So the assertion is behavioural:
+# enumerate the subcommands from `ts` itself, run each with the flags it
+# accepts, and require tool_version from anything whose stdout is JSON. That
+# needs no pattern kept in step with how someone writes a serialiser, and it
+# fails the same way for a surface written in any of the three shapes.
+help_txt = subprocess.run([ts, "--help"], env=env, capture_output=True,
+                          text=True).stdout or ""
+try:
+    body = help_txt.split("COMMANDS", 1)[1].split("COMMON OPTIONS", 1)[0]
+except IndexError:
+    body = ""
+subcommands = re.findall(r"^\s{2}([a-z][a-z-]*)\s{2,}\S", body, re.M)
+if len(subcommands) < 5:
+    bad.append("parsed %d subcommands from `ts --help`; the behavioural sweep "
+               "cannot be trusted to cover the surfaces" % len(subcommands))
+
+SKIP = {"version", "fixes"}          # emit no JSON payload of their own
+exercised = set()
+for cmd in subcommands:
+    if cmd in SKIP:
         continue
-    v = d.get("tool_version")
-    if not v:
-        bad.append("%s carries no tool_version; a consumer cannot tell which "
-                   "shape it is holding" % name)
-    elif not re.match(r"^\d+\.\d+\.\d+$|^unknown$", str(v)):
-        bad.append("%s tool_version is %r, not a version" % (name, v))
+    for flags in (["--json"], ["--show"]):
+        argv = [ts, cmd] + flags
+        if cmd in ("audit", "advise", "share"):
+            argv += ["--root", os.path.join(tmp, "bulk")]
+        if cmd == "now":
+            sess = None
+            for dirpath, _d, files in os.walk(os.path.join(tmp, "bulk")):
+                for f in files:
+                    if f.endswith(".jsonl"):
+                        sess = os.path.join(dirpath, f)
+                        break
+                if sess:
+                    break
+            if not sess:
+                bad.append("no transcript to run `ts now` against")
+                continue
+            argv = [ts, cmd, "--session", sess] + flags
+        r = subprocess.run(argv, env=env, capture_output=True, text=True)
+        out = (r.stdout or "").strip()
+        if not out.startswith("{"):
+            continue
+        try:
+            d = json.loads(out)
+        except Exception:
+            continue
+        exercised.add(cmd)
+        v = d.get("tool_version")
+        if not v:
+            bad.append("`ts %s %s` emits JSON with no tool_version"
+                       % (cmd, " ".join(flags)))
+        elif not re.match(r"^\d+\.\d+\.\d+$|^unknown$", str(v)):
+            bad.append("`ts %s` tool_version is %r, not a version" % (cmd, v))
+
+# The two layers meet here: every module the coarse net flagged must be
+# dispatched by a subcommand the sweep actually ran. A module the sweep cannot
+# reach is unasserted; one the net cannot see is invisible. Neither passes.
+for mod in sorted(emitters):
+    sub = dispatch.get(mod)
+    if sub is None:
+        bad.append("%s emits JSON and `ts` dispatches no subcommand to it, so "
+                   "nothing exercises it" % mod)
+    elif sub not in exercised:
+        bad.append("%s emits JSON via `ts %s`, which the sweep did not reach"
+                   % (mod, sub))
 
 # One resolver, not five. Five copies of a definition is how `stored` drifted
 # in #27 and how cmd_share was missed entirely in #33.
-for name in KNOWN:
+for name in sorted(emitters):
     src = open(os.path.join(lib, name + ".py")).read()
     if "def tool_version" in src or "def _tool_version" in src:
         bad.append("%s defines its own tool_version; import the shared one"
