@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import machine  # noqa: E402
 import report as R  # noqa: E402
-from transcripts import (Fleet, find_sessions,  # noqa: E402
+from transcripts import (Fleet, find_sessions, tool_version,  # noqa: E402
                          find_transcripts, quantile, tokenizer_name,
                          transcript_dir)
 
@@ -176,7 +176,11 @@ def main(argv=None) -> int:
     mach = machine.collect()
 
     if args.json:
-        print(json.dumps(mach, indent=1, default=str))
+        # dict(mach) so the emitted payload carries it without mutating the
+        # collected machine facts, which other callers read.
+        payload = dict(mach)
+        payload["tool_version"] = tool_version()
+        print(json.dumps(payload, indent=1, default=str))
         return 0
 
     selective = any([args.memory, args.mcp, args.hooks, args.tools])

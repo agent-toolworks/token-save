@@ -1228,6 +1228,78 @@ SEVORD
 [[ $sevord == CLEAR ]] && ok "severity agrees with position, including findings that claim no saving" \
                        || bad "severity and rank disagree" "${sevord//|/$'\n        '}"
 
+# #35: `share` carried schema and tool_version; the other four JSON surfaces
+# carried neither. advise --json changed shape three times in 48 hours (#28,
+# #30, #32) with no field saying which shape a consumer held -- strictly worse
+# than the situation #18 fixed, where the field existed and was merely wrong.
+# Enumerated from the code rather than listed here, so a sixth --json cannot be
+# added without either carrying the field or failing this.
+vers=$(python3 - "$ROOT" "$TMP" <<'VERS'
+import json, os, re, subprocess, sys
+root, tmp = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+lib = os.path.join(root, "scripts", "lib")
+env = dict(os.environ)
+bad = []
+
+# Every module that emits JSON must be covered, discovered rather than pinned.
+emitters = set()
+for name in os.listdir(lib):
+    if not name.endswith(".py"):
+        continue
+    src = open(os.path.join(lib, name)).read()
+    if "json.dumps(" in src and re.search(r"args\.json|--json|--show", src):
+        emitters.add(name[:-3])
+KNOWN = {"audit": ["audit", "--root", os.path.join(tmp, "bulk"), "--json"],
+         "cmd_advise": ["advise", "--root", os.path.join(tmp, "bulk"), "--json"],
+         "cmd_now": ["now", "--session", os.path.join(tmp, "bulk", "proj-bulk")],
+         "cmd_doctor": ["doctor", "--json"],
+         "cmd_share": ["share", "--root", os.path.join(tmp, "bulk"), "--show"]}
+missing = emitters - set(KNOWN)
+if missing:
+    bad.append("%s emit JSON and are not covered here; add them or the field "
+               "can be omitted from a new surface unnoticed" % sorted(missing))
+
+for name, argv in KNOWN.items():
+    if name == "cmd_now":
+        sess = None
+        for dirpath, _d, files in os.walk(os.path.join(tmp, "bulk")):
+            for f in files:
+                if f.endswith(".jsonl"):
+                    sess = os.path.join(dirpath, f)
+                    break
+            if sess:
+                break
+        if not sess:
+            bad.append("no transcript to run `ts now` against")
+            continue
+        argv = ["now", "--session", sess, "--json"]
+    r = subprocess.run([ts] + argv, env=env, capture_output=True, text=True)
+    try:
+        d = json.loads(r.stdout)
+    except Exception:
+        bad.append("%s: --json did not parse (exit %d)" % (name, r.returncode))
+        continue
+    v = d.get("tool_version")
+    if not v:
+        bad.append("%s carries no tool_version; a consumer cannot tell which "
+                   "shape it is holding" % name)
+    elif not re.match(r"^\d+\.\d+\.\d+$|^unknown$", str(v)):
+        bad.append("%s tool_version is %r, not a version" % (name, v))
+
+# One resolver, not five. Five copies of a definition is how `stored` drifted
+# in #27 and how cmd_share was missed entirely in #33.
+for name in KNOWN:
+    src = open(os.path.join(lib, name + ".py")).read()
+    if "def tool_version" in src or "def _tool_version" in src:
+        bad.append("%s defines its own tool_version; import the shared one"
+                   % name)
+print("|".join(bad) if bad else "CLEAR")
+VERS
+)
+[[ $vers == CLEAR ]] && ok "every --json surface says which version produced it, from one resolver" \
+                     || bad "a JSON surface does not identify itself" "${vers//|/$'\n        '}"
+
 # #28: the union ARITHMETIC was right and the SENTENCES were wrong, which is
 # why the check above did not catch either bug. A summary line read alone said
 # "taken together they are worth at least 1.3%" directly above a 15.3% finding,

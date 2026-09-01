@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import report as R  # noqa: E402
 from transcripts import (  # noqa: E402
     PRICE, Fleet, command_program, human, pct, positive_int, project_filter,
-    quantile, tokenizer_name, transcript_dir, unmatched_project_note,
+    quantile, tokenizer_name, tool_version, transcript_dir,
+    unmatched_project_note,
 )
 
 
@@ -238,6 +239,7 @@ def _as_json(fleet: Fleet) -> str:
     floors = sorted(s.floor for s in subs if s.floor)
     outs = sorted(fleet.bash_out())
     return json.dumps({
+        "tool_version": tool_version(),
         "tokenizer": tokenizer_name(),
         "sessions": len(fleet.main_sessions()),
         "subagent_transcripts": len(fleet.subagents()),

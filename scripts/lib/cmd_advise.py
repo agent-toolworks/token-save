@@ -16,8 +16,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import advise  # noqa: E402
 import machine  # noqa: E402
 import report as R  # noqa: E402
+# `advise --json` changed shape three times in 48 hours (#28, #30, #32) with
+# no field saying which one a consumer is holding -- strictly worse than the
+# situation #18 fixed, where `schema` existed and was merely wrong. No
+# `schema` here: adding 1 today would assert this is the first shape when
+# three released ones precede it, and starting at 4 is machinery for a
+# surface read in the moment. tool_version answers the question
+# unambiguously, and #18 made it a real version rather than the literal
+# "ts". `share` keeps its schema, where a profile outlives its tool and is
+# compared across machines.
 from transcripts import (Fleet, positive_int, project_filter,  # noqa: E402
-                         tokenizer_name, transcript_dir,
+                         tokenizer_name, tool_version, transcript_dir,
                          unmatched_project_note)
 
 
@@ -240,6 +249,7 @@ def main(argv=None) -> int:
     union, groups = advise.union_lower_bound(findings)
     if args.json:
         print(json.dumps({
+            "tool_version": tool_version(),
             "tokenizer": tokenizer_name(),
             "sessions": len(fleet.main_sessions()),
             "subagent_transcripts": len(fleet.subagents()),

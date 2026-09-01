@@ -31,7 +31,7 @@ import advise as A  # noqa: E402
 import machine as M  # noqa: E402
 import report as R  # noqa: E402
 from transcripts import (Fleet, quantile, tokenizer_name,  # noqa: E402
-                         transcript_dir)
+                         tool_version, transcript_dir)
 
 # Bump on ANY change to a field name, a field type, or the MEANING of a value.
 # Schema 3: `saving_pct` became nullable and gained `locates_pct` and
@@ -50,28 +50,6 @@ from transcripts import (Fleet, quantile, tokenizer_name,  # noqa: E402
 # 134 on an unchanged workload. A collection that cannot recover which of
 # those a profile is cannot calibrate anything, which is what profiles are
 # being gathered for.
-def _tool_version() -> str:
-    """The version that produced this profile.
-
-    Preferred from the environment, which `ts` exports, so the answer matches
-    the CLI the user actually ran. Falls back to the plugin manifest for a
-    direct `python3 scripts/lib/cmd_share.py` invocation, and says so plainly
-    rather than guessing when neither is available -- an unknown version is a
-    usable fact, a wrong one is not.
-    """
-    env = os.environ.get("TS_VERSION")
-    if env:
-        return env
-    manifest = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        ".claude-plugin", "plugin.json")
-    try:
-        with open(manifest, "r", errors="replace") as fh:
-            return str(json.load(fh).get("version") or "unknown")
-    except Exception:
-        return "unknown"
-
-
 SCHEMA = 3
 
 
@@ -125,7 +103,7 @@ def build(fleet: Fleet, mach: dict) -> dict:
         # generated -- the wrong token out of `ts version`'s "ts 0.11.0".
         # With a real version, a profile identifies itself even across a
         # schema bump that someone forgets.
-        "tool_version": _tool_version(),
+        "tool_version": tool_version(),
         "generated_by": "ts share",
         "platform": {
             "os": platform.system(),

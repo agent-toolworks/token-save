@@ -363,6 +363,32 @@ def transcript_dir() -> str:
         os.environ.get("TS_TRANSCRIPT_DIR", "~/.claude/projects"))
 
 
+def tool_version() -> str:
+    """The version that produced this output.
+
+    Preferred from the environment, which `ts` exports, so the answer matches
+    the CLI the user actually ran. Falls back to the plugin manifest for a
+    direct `python3 scripts/lib/<cmd>.py` invocation, and says so plainly
+    rather than guessing when neither is available -- an unknown version is a
+    usable fact, a wrong one is not.
+
+    Lives here rather than in cmd_share because all five commands emit JSON and
+    all five import this module. Five copies of a version resolver is how the
+    `stored` definition drifted in #27 and how cmd_share was missed in #33.
+    """
+    env = os.environ.get("TS_VERSION")
+    if env:
+        return env
+    manifest = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        ".claude-plugin", "plugin.json")
+    try:
+        with open(manifest, "r", errors="replace") as fh:
+            return str(json.load(fh).get("version") or "unknown")
+    except Exception:
+        return "unknown"
+
+
 def find_transcripts(root: str = None, project: str = None) -> list:
     """Every transcript under ``root``, at any depth.
 

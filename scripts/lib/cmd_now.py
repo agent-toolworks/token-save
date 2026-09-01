@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import report as R  # noqa: E402
 from transcripts import (PRICE, Session, find_sessions, human,  # noqa: E402
-                         parse, pct, positive_int)
+                         parse, pct, positive_int, tool_version)
 
 # Recent turns used for the growth rate. Short enough to react to a change of
 # activity, long enough that one big file read does not dominate.
@@ -264,6 +264,7 @@ def main(argv=None) -> int:
     a = analyse(sess, args.window)
     if args.json:
         out = dict(a)
+        out["tool_version"] = tool_version()
         if out["breakeven_turns"] == float("inf"):
             out["breakeven_turns"] = None
         print(json.dumps(out, indent=1))
