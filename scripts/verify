@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # verify — prove the numbers and the routing, against fixtures with known answers.
 #
-# Three things are checked, in order of how badly a regression would hurt:
+# The first three groups, in order of how badly a regression would hurt (the
+# rest are printed as they run, and the summary line gives the total):
 #
 #   1. ARITHMETIC  billed and content totals match values derived by hand in
 #                  fixtures/EXPECTATIONS.json. Nothing here was recorded from
@@ -2813,6 +2814,35 @@ if [[ -z $uncovered ]]; then
   ok "every detector in CATALOGUE is covered or explicitly exempt"
 else
   bad "detectors with no fixture and no exemption" "$uncovered"
+fi
+
+# The README's "Full catalogue:" is the list a new reader takes as complete,
+# and it sat at 11 ids for as long as CATALOGUE had 12 (#39). Compared as sets
+# of ids in both directions, so a stale entry fails as loudly as a missing one.
+readme_cat=$(python3 - "$ROOT" <<'RCAT'
+import os, re, sys
+root = sys.argv[1]
+sys.path.insert(0, os.path.join(root, "scripts", "lib"))
+import advise
+text = open(os.path.join(root, "README.md")).read()
+m = re.search(r"^Full catalogue:(.*?)(?:\n\n|\Z)", text, re.S | re.M)
+if not m:
+    print("README.md has no 'Full catalogue:' paragraph")
+    sys.exit()
+listed = set(re.findall(r"`([a-z0-9-]+)`", m.group(1)))
+code = set(advise.CATALOGUE)
+bad = []
+if code - listed:
+    bad.append("missing from README: " + ", ".join(sorted(code - listed)))
+if listed - code:
+    bad.append("in README but not CATALOGUE: " + ", ".join(sorted(listed - code)))
+print("|".join(bad) or "CLEAR")
+RCAT
+)
+if [[ $readme_cat == CLEAR ]]; then
+  ok "README's catalogue lists exactly the ids in CATALOGUE"
+else
+  bad "README's catalogue disagrees with CATALOGUE" "${readme_cat//|/$'\n        '}"
 fi
 
 # ---------------------------------------------------------------------------

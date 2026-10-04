@@ -143,7 +143,7 @@ everyone has not read anything.
 
 Full catalogue: `preamble`, `session-length`, `subagent-cost`, `bash-chatter`,
 `bash-bulk`, `output-verbosity`, `mcp-schema`, `repeat-reads`, `images`,
-`reasoning-cost`, `attachments`.
+`reasoning-cost`, `attachments`, `hook-output`.
 
 Each finding also reports how far past its own threshold this machine sits.
 Firing is not one bit of information: a machine at 1.05x a threshold and one
@@ -187,8 +187,10 @@ artifact rather than a data point.
 A typical profile is about 3KB.
 
 If you run this and the advice looks wrong for your machine, that is the most
-useful bug report this project can get. Two of the ten detectors have never
-fired on real data.
+useful bug report this project can get. So is a detector that never fires for
+anyone: some of the catalogue has so far fired only on the fixtures built to
+trip it, and a shared profile records which detectors fired, which is how that
+changes.
 
 ### The amplification figure varies by machine, and by version
 
@@ -285,14 +287,16 @@ reduce tokens?" from general knowledge, which is close to a coin flip.
 scripts/verify
 ```
 
-Twenty-seven checks in seven groups: arithmetic against hand-derived
+It prints its own total; the groups are: arithmetic against hand-derived
 expectations in `fixtures/EXPECTATIONS.json` (not recorded from program output
 — a self-test that records its own output tests nothing), routing across the
-two opposite fleets, detector coverage (every entry in the catalogue must have
-a fixture that fires it, or a named exemption), version agreement, redaction
-against a planted canary, the live signal's arithmetic, and safety — including
-that an unparseable `settings.json` is refused rather than overwritten and that
-the statusline cannot hang.
+two opposite fleets, safety — including that an unparseable `settings.json` is
+refused rather than overwritten and that the statusline cannot hang — the
+command classifier behind the Bash leaderboard, detector coverage (every entry
+in the catalogue must have a fixture that fires it, or a named exemption),
+version agreement, redaction against a planted canary, the live signal's
+arithmetic, and argument validation. It also checks that the catalogue listed
+above is the one the code runs.
 
 ## Licence
 
