@@ -112,19 +112,34 @@ when several sessions are open. It never hangs, never writes to stderr and
 never exits non-zero, whatever it is handed — three things `scripts/verify`
 checks, because a statusline that can fail breaks the prompt.
 
-`scripts/statusline-snippet.sh` is a ready-made version. Use it as your whole
-statusline:
+`scripts/statusline-snippet.sh` is a ready-made version. To use it as your
+whole statusline, copy it out of the plugin once:
+
+```sh
+cp "$(ls -dt ~/.claude/plugins/cache/*/token-save/*/scripts/statusline-snippet.sh | head -1)" ~/.claude/   # the most recently installed
+```
 
 ```json
 { "statusLine": { "type": "command",
-                  "command": "~/.claude/plugins/cache/agent-toolworks/token-save/*/scripts/statusline-snippet.sh" } }
+                  "command": "~/.claude/statusline-snippet.sh" } }
 ```
 
 or copy the block between the `BEGIN`/`END` markers into the statusline you
 already have, call `ts_segment "$input"` where you want it, and append the
-result only when it is non-empty. It resolves `ts` itself, bounds the call, and
-prints nothing at all if the plugin is absent, the transcript is unknown, or
-anything goes wrong — so adding it cannot break a prompt that works today.
+result only when it is non-empty. Either way the copy does not go stale on an
+update: it finds the newest installed `ts` itself, under whichever marketplace
+you installed from, so the command never points into the versioned plugin
+cache, whose old directories stay behind after an update. Set `TS_BIN` to a
+`scripts/ts` path to skip that lookup. It needs nothing beyond bash — no `jq`.
+
+It bounds the call and prints nothing at all if the plugin is absent, the
+transcript is unknown, or anything goes wrong — so adding it cannot break a
+prompt that works today. The price is that a setup problem looks like "nothing
+to report". If the segment stays empty, ask it why:
+
+```sh
+echo '{"transcript_path":"/path/to/session.jsonl"}' | ~/.claude/statusline-snippet.sh --explain
+```
 
 ## The catalogue gives different machines opposite advice
 

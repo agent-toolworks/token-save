@@ -3042,6 +3042,59 @@ for label in empty garbage missing; do
   fi
 done
 
+# #38: the snippet resolved `ts` under one marketplace name only, so the
+# README's second install route (marketplace `token-save-fleet`) left it
+# silently empty for good -- and it read transcript_path with jq, which nothing
+# declared, so a machine without jq got the same silence. A fake plugin cache
+# holds versions under both marketplace names, chosen so that whole-path
+# sorting, first-found and lexical version order each pick a wrong one, and a
+# jq that always fails is first on PATH. Each fake `ts` echoes its version, so
+# the output names which one ran.
+SNIP="$ROOT/scripts/statusline-snippet.sh"
+slc="$TMP/slcache"
+for p in agent-toolworks/token-save/0.9.0 token-save-fleet/token-save/0.10.0 \
+         token-save-fleet/token-save/0.2.0; do
+  mkdir -p "$slc/plugins/cache/$p/scripts"
+  printf '#!/bin/sh\necho "%s $*"\n' "${p##*/}" > "$slc/plugins/cache/$p/scripts/ts"
+  chmod +x "$slc/plugins/cache/$p/scripts/ts"
+done
+mkdir -p "$TMP/nojq"; printf '#!/bin/sh\nexit 127\n' > "$TMP/nojq/jq"; chmod +x "$TMP/nojq/jq"
+sltr="$TMP/sl session.jsonl"; : > "$sltr"
+slrun() { # stdin-json [extra env...] -> stdout; stderr and rc recorded
+  local json=$1; shift
+  printf '%s' "$json" | bounded 20 env PATH="$TMP/nojq:$PATH" CLAUDE_CONFIG_DIR="$slc" "$@" \
+    bash "$SNIP" >"$TMP/snip.out" 2>"$TMP/snip.err"
+  echo $? >"$TMP/snip.rc"
+}
+want="0.10.0 now --statusline --session $sltr"
+slrun "{\"session_id\": \"s\", \"transcript_path\": \"$sltr\", \"cwd\": \"/\"}"
+if [[ $(cat "$TMP/snip.out") == "$want" && ! -s $TMP/snip.err && $(cat "$TMP/snip.rc") == 0 ]]; then
+  ok "statusline snippet: newest ts across marketplace names, without jq"
+else
+  bad "statusline snippet did not run the newest ts across marketplaces without jq" \
+      "got [$(cat "$TMP/snip.out")] rc=$(cat "$TMP/snip.rc"), want [$want]"
+fi
+slrun "{\"transcript_path\": \"$sltr\"}" TS_BIN="$slc/plugins/cache/token-save-fleet/token-save/0.2.0/scripts/ts"
+[[ $(cat "$TMP/snip.out") == "0.2.0 "* ]] && ok "statusline snippet: TS_BIN overrides the cache lookup" \
+  || bad "statusline snippet ignored TS_BIN" "got [$(cat "$TMP/snip.out")]"
+# The other branch: no transcript_path must stay empty rather than guess.
+slrun '{"session_id": "s"}'
+if [[ ! -s $TMP/snip.out && ! -s $TMP/snip.err && $(cat "$TMP/snip.rc") == 0 ]]; then
+  ok "statusline snippet: no transcript_path prints nothing, exits 0"
+else
+  bad "statusline snippet guessed or complained without a transcript_path" \
+      "out [$(cat "$TMP/snip.out")] err [$(head -1 "$TMP/snip.err")]"
+fi
+# --explain is the way out of the silent path: it must name the empty step.
+printf '{}' | bounded 20 env CLAUDE_CONFIG_DIR="$TMP/no-such-config" bash "$SNIP" --explain \
+  >"$TMP/snip.out" 2>"$TMP/snip.err"
+if grep -q 'no transcript_path' "$TMP/snip.out" && grep -q 'none found' "$TMP/snip.out" \
+   && [[ ! -s $TMP/snip.err ]]; then
+  ok "statusline snippet --explain names the step that came up empty"
+else
+  bad "statusline snippet --explain did not say why it is empty" "$(head -3 "$TMP/snip.out")"
+fi
+
 
 # ---------------------------------------------------------------------------
 head_ "9. ARGUMENT VALIDATION  (a flag that cannot mean what was asked)"
