@@ -1,0 +1,34 @@
+name: release
+
+# Every v* tag gets a GitHub Release (#37). Tags v0.1.0 to v0.23.1 were pushed
+# with none, so release links 404ed and a teammate had no page that said what
+# the latest version is. Done here rather than as a manual step because the
+# manual step is the one that was skipped twenty-four times.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The notes are the tagged commit's own message -- a "Release X.Y.Z"
+      # commit says which tickets it carries -- without the attribution
+      # trailers. --generate-notes appends the compare link to the previous tag.
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          git log -1 --format=%b "$TAG" \
+            | grep -v -E '^(Co-Authored-By|Claude-Session):' > "$RUNNER_TEMP/notes.md"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists"; exit 0
+          fi
+          gh release create "$TAG" --verify-tag --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes

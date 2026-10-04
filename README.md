@@ -296,6 +296,37 @@ This registers the `token-save` skill, which teaches the agent to measure
 before it advises — the failure mode being that a model answers "how do I
 reduce tokens?" from general knowledge, which is close to a coin flip.
 
+### Updating
+
+A plugin install is a **copy**, not a checkout. Claude Code copies the plugin
+into `~/.claude/plugins/cache/<marketplace>/token-save/<version>/` and runs it
+from there, so `git pull` in a clone changes nothing it runs, and nothing
+updates the copy for you. That matters more here than for most tools: numbers
+from before v0.11.0 are not comparable with later ones (see *Sharing your
+numbers*), so a stale install gives you wrong numbers, not just old ones. One
+machine was found running 0.7.0 from its cache while its clone sat at 0.21.0.
+
+```sh
+claude plugin marketplace update agent-toolworks   # or token-save-fleet, if you added this repo
+claude plugin update token-save                    # then restart Claude Code
+```
+
+To see which version you are running, and what is installed:
+
+```sh
+ls ~/.claude/plugins/cache/*/token-save/            # one directory per installed version
+~/.claude/plugins/cache/*/token-save/<version>/scripts/ts version
+```
+
+and compare with the newest of the
+[releases](https://github.com/agent-toolworks/token-save/releases), which carry
+notes saying which tickets each one fixed.
+
+Old version directories stay in the cache after an update. Once you have
+updated and restarted, the older ones can be deleted; nothing in this
+repository reads them except the statusline snippet, which always picks the
+newest.
+
 ## Verifying it
 
 ```sh
