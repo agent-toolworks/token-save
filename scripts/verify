@@ -1695,6 +1695,94 @@ TDIR
 [[ $tdir == CLEAR ]] && ok "TS_TRANSCRIPT_DIR is reported, not just searched" \
                      || bad "transcript root misreported" "${tdir//|/$'\n        '}"
 
+# #40: a plugin install is a copy that nothing updates, and ts had no way to
+# say it was stale (#37). doctor now compares, offline, the running version
+# with the plugin cache, with what Claude Code loads, and with a marketplace
+# clone of this repo. Both branches: a config built to be stale on every axis
+# must say so on each, and one holding only the running version must not.
+stale=$(python3 - "$TMP" "$ROOT" <<'STALE'
+import json, os, subprocess, sys
+
+tmp, root = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+cur = json.load(open(os.path.join(root, ".claude-plugin", "plugin.json")))["version"]
+bad = []
+
+def config(name, cache, registered, offered=None, installed_json=None):
+    cfg = os.path.join(tmp, "stale-" + name)
+    for mkt, ver in cache:
+        d = os.path.join(cfg, "plugins", "cache", mkt, "token-save", ver,
+                         ".claude-plugin")
+        os.makedirs(d, exist_ok=True)
+        json.dump({"name": "token-save", "version": ver},
+                  open(os.path.join(d, "plugin.json"), "w"))
+    if offered:
+        d = os.path.join(cfg, "plugins", "marketplaces", "token-save-fleet",
+                         ".claude-plugin")
+        os.makedirs(d, exist_ok=True)
+        json.dump({"name": "token-save", "version": offered},
+                  open(os.path.join(d, "plugin.json"), "w"))
+    reg = {"version": 2, "plugins": {"token-save@%s" % m: [
+        {"scope": "user", "version": v, "installPath": os.path.join(
+            cfg, "plugins", "cache", m, "token-save", v)}] for m, v in registered}}
+    os.makedirs(os.path.join(cfg, "plugins"), exist_ok=True)
+    with open(os.path.join(cfg, "plugins", "installed_plugins.json"), "w") as fh:
+        fh.write(installed_json if installed_json is not None else json.dumps(reg))
+    return cfg
+
+def doctor(cfg, *flags):
+    env = dict(os.environ, CLAUDE_CONFIG_DIR=cfg)
+    r = subprocess.run([ts, "doctor"] + list(flags), env=env,
+                       capture_output=True, text=True)
+    if r.returncode != 0 or r.stderr.strip():
+        bad.append("doctor %s exited %d: %s" % (" ".join(flags), r.returncode,
+                                                 r.stderr.strip()[:120]))
+    return r.stdout
+
+# Stale three ways: 99.0.0 in the cache above what runs; Claude Code loading
+# 0.9.0; and the marketplace clone offering 99.1.0. Two marketplace names, and
+# 0.10.0 beside 0.9.0, so lexical order would rank the wrong one newest.
+cfg = config("fires", [("agent-toolworks", "0.9.0"), ("agent-toolworks", "0.10.0"),
+                       ("token-save-fleet", "99.0.0")],
+             [("agent-toolworks", "0.9.0")], offered="99.1.0")
+out = doctor(cfg, "--json")
+try:
+    inst = json.loads(out)["install"]
+except Exception as e:
+    inst = None
+    bad.append("doctor --json carries no install block: %s" % e)
+if inst:
+    if inst["newest_installed"] != "99.0.0":
+        bad.append("newest installed is %r, want 99.0.0" % inst["newest_installed"])
+    want = ["running %s, but 99.0.0 is in the plugin cache" % cur,
+            "Claude Code loads 0.9.0 (token-save@agent-toolworks), but 99.1.0 "
+            "is offered by the token-save-fleet marketplace"]
+    if inst["stale"] != want:
+        bad.append("stale reasons %r, want %r" % (inst["stale"], want))
+if out and "stale: " not in doctor(cfg):
+    bad.append("the human-readable doctor does not say stale")
+
+# Current everywhere: nothing to flag.
+cfg = config("quiet", [("token-save-fleet", cur)], [("token-save-fleet", cur)],
+             offered=cur)
+out = doctor(cfg, "--json")
+try:
+    if json.loads(out)["install"]["stale"] != []:
+        bad.append("a current install is called stale: %r"
+                   % json.loads(out)["install"]["stale"])
+except Exception as e:
+    bad.append("doctor --json on a current install: %s" % e)
+if "stale: " in doctor(cfg):
+    bad.append("the human-readable doctor says stale on a current install")
+
+# Degrade, never crash: an unparseable installed_plugins.json.
+doctor(config("broken", [("agent-toolworks", cur)], [], installed_json="{ nope"))
+print("|".join(bad) if bad else "CLEAR")
+STALE
+)
+[[ $stale == CLEAR ]] && ok "doctor flags a stale install against cache, loaded copy and marketplace, and only then" \
+                      || bad "doctor's staleness report is wrong" "${stale//|/$'\n        '}"
+
 # A corrupt settings.json must be refused, not overwritten. This is the one
 # failure mode that would destroy user configuration.
 printf '{ this is not json' > "$CLAUDE_CONFIG_DIR/settings.json"

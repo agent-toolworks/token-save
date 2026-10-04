@@ -51,6 +51,42 @@ def _environment() -> str:
     return "\n".join(out)
 
 
+def _running_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+
+
+def _install(inst) -> str:
+    """Which copy is running, and whether it is the newest one here (#40)."""
+    run = inst["running"]
+    out = [R.heading("THIS INSTALL")]
+    out.append(R.kv("running", run["version"],
+                    _short(run["path"]) + ("" if run["from_plugin_cache"]
+                                           else "  (not the plugin cache)")))
+    for r in inst["registered"]:
+        out.append(R.kv("Claude Code loads", r["version"],
+                        "token-save@%s, %s scope" % (r["marketplace"],
+                                                     r["scope"] or "?")))
+    if inst["cached"]:
+        out.append(R.kv("in plugin cache", ", ".join(
+            "%s (%s)" % (c["version"], c["marketplace"]) for c in inst["cached"])))
+    else:
+        out.append(R.kv("in plugin cache", R.dim("(none)")))
+    for a in inst["available"]:
+        out.append(R.kv("marketplace offers", a["version"], a["marketplace"]))
+    for line in inst["stale"]:
+        out.append("  " + R.yellow("stale: ") + line)
+    if inst["stale"]:
+        out.append("  " + R.dim("fix: claude plugin marketplace update, then "
+                                "claude plugin update token-save, then restart"))
+    if not inst["available"]:
+        # A marketplace that lists the plugin by URL carries no version, and
+        # this tool makes no network calls, so "newest here" is all it can say.
+        out.append("  " + R.dim("newest release: not knowable offline — see "
+                                "github.com/agent-toolworks/token-save/releases"))
+    return "\n".join(out)
+
+
 def _nothing_found_hint() -> str:
     """The last line carrying the #20 defect: it advised setting the variable
     that was already set and already used. Same shape as the original bug, in
@@ -180,12 +216,14 @@ def main(argv=None) -> int:
         # collected machine facts, which other callers read.
         payload = dict(mach)
         payload["tool_version"] = tool_version()
+        payload["install"] = machine.plugin_installs(_running_root(), tool_version())
         print(json.dumps(payload, indent=1, default=str))
         return 0
 
     selective = any([args.memory, args.mcp, args.hooks, args.tools])
     if not selective:
         print(_environment())
+        print(_install(machine.plugin_installs(_running_root(), tool_version())))
         shape = _shape()
         if shape:
             print(shape)

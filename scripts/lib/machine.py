@@ -298,6 +298,109 @@ def hooks() -> dict:
     return out
 
 
+def _version_key(v: str) -> tuple:
+    """0.10.0 above 0.9.0. A non-numeric part sorts below any number, so a
+    directory that is not a version never outranks one that is."""
+    return tuple((1, int(p)) if p.isdigit() else (0, p)
+                 for p in re.split(r"[.+-]", str(v)))
+
+
+def plugin_installs(running_root: str, running_version: str) -> dict:
+    """Which copies of token-save exist here, which one is running, and which
+    one Claude Code loads -- read from disk, never from the network (#40).
+
+    A plugin install is a copy under plugins/cache/<marketplace>/token-save/
+    <version>/, and `git pull` or a marketplace update does not change it, so a
+    stale copy keeps running with nothing saying so (#37). Three local sources
+    can show it:
+
+    - the cache directories, one per version ever installed and not removed;
+    - installed_plugins.json, the copy Claude Code actually loads per install;
+    - a marketplace clone that IS this repo (`token-save-fleet`), whose
+      plugin.json names what an update would install. A marketplace that only
+      lists the plugin by URL carries no version, so for that route the newest
+      release is not knowable offline, and the report says so.
+    """
+    plugins = os.path.join(CLAUDE_HOME, "plugins")
+    cached = []
+    cache = os.path.join(plugins, "cache")
+    try:
+        markets = sorted(os.listdir(cache))
+    except OSError:
+        markets = []
+    for mkt in markets:
+        base = os.path.join(cache, mkt, "token-save")
+        try:
+            versions = sorted(os.listdir(base))
+        except OSError:
+            continue
+        for d in versions:
+            path = os.path.join(base, d)
+            if not os.path.isdir(path):
+                continue
+            mf = _read_json(os.path.join(path, ".claude-plugin", "plugin.json"))
+            ver = mf.get("version") if isinstance(mf, dict) else None
+            cached.append({"marketplace": mkt, "version": str(ver or d),
+                           "path": path})
+    cached.sort(key=lambda c: _version_key(c["version"]))
+
+    registered = []
+    ip = _read_json(os.path.join(plugins, "installed_plugins.json"))
+    entries = ip.get("plugins") if isinstance(ip, dict) else None
+    for key, recs in (entries.items() if isinstance(entries, dict) else ()):
+        name, _, mkt = str(key).partition("@")
+        if name != "token-save" or not isinstance(recs, list):
+            continue
+        for r in recs:
+            if isinstance(r, dict) and r.get("version"):
+                registered.append({"marketplace": mkt,
+                                   "version": str(r["version"]),
+                                   "scope": r.get("scope"),
+                                   "path": r.get("installPath")})
+
+    available = []
+    try:
+        mdirs = sorted(os.listdir(os.path.join(plugins, "marketplaces")))
+    except OSError:
+        mdirs = []
+    for mkt in mdirs:
+        mf = _read_json(os.path.join(plugins, "marketplaces", mkt,
+                                     ".claude-plugin", "plugin.json"))
+        if isinstance(mf, dict) and mf.get("name") == "token-save" \
+                and mf.get("version"):
+            available.append({"marketplace": mkt, "version": str(mf["version"])})
+
+    real = os.path.realpath(running_root)
+    from_cache = any(os.path.realpath(c["path"]) == real for c in cached)
+    newest_installed = cached[-1]["version"] if cached else None
+    # Every version this machine can see, with where it was seen. The running
+    # copy counts: a clone at 0.23 with Claude Code loading 0.6 from the cache
+    # is the #37 machine exactly, and is invisible if only the cache counts.
+    seen = [(c["version"], "in the plugin cache") for c in cached]
+    seen += [(a["version"], "offered by the %s marketplace" % a["marketplace"])
+             for a in available]
+    numeric = re.match(r"\d", str(running_version))
+    if numeric:
+        seen.append((running_version, "running here"))
+    newest_known = max(seen, key=lambda s: _version_key(s[0])) if seen else None
+
+    stale = []
+    # An "unknown" version would sort below every real one and read as stale.
+    if newest_installed and numeric \
+            and _version_key(running_version) < _version_key(newest_installed):
+        stale.append("running %s, but %s is in the plugin cache"
+                     % (running_version, newest_installed))
+    for r in registered:
+        if newest_known and _version_key(r["version"]) < _version_key(newest_known[0]):
+            stale.append("Claude Code loads %s (token-save@%s), but %s is %s"
+                         % (r["version"], r["marketplace"], newest_known[0],
+                            newest_known[1]))
+    return {"running": {"version": running_version, "path": running_root,
+                        "from_plugin_cache": from_cache},
+            "cached": cached, "registered": registered, "available": available,
+            "newest_installed": newest_installed, "stale": stale}
+
+
 def collect(cwd: str = None) -> dict:
     """One call for every detector that needs to know about this machine."""
     return {

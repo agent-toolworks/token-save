@@ -311,16 +311,16 @@ claude plugin marketplace update agent-toolworks   # or token-save-fleet, if you
 claude plugin update token-save                    # then restart Claude Code
 ```
 
-To see which version you are running, and what is installed:
-
-```sh
-ls ~/.claude/plugins/cache/*/token-save/            # one directory per installed version
-~/.claude/plugins/cache/*/token-save/<version>/scripts/ts version
-```
-
-and compare with the newest of the
-[releases](https://github.com/agent-toolworks/token-save/releases), which carry
-notes saying which tickets each one fixed.
+`ts doctor` says whether you are behind, without a network call. Under *THIS
+INSTALL* it lists the version running, the one Claude Code loads, and every
+version in the plugin cache, and prints `stale:` when the loaded or running
+copy is older than one this machine already has. If you added this repository
+as the marketplace, that includes a marketplace updated and a plugin not, since
+the marketplace clone carries the version. The org catalogue lists the plugin
+by URL with no version, so through that route a release nothing here has
+fetched is invisible offline: compare with the newest of the
+[releases](https://github.com/agent-toolworks/token-save/releases), which
+carry notes saying which tickets each one fixed.
 
 Old version directories stay in the cache after an update. Once you have
 updated and restarted, the older ones can be deleted; nothing in this
