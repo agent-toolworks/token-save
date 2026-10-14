@@ -3269,6 +3269,175 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+head_ "10. STATUSLINE AND HISTORY  (ts statusline, #41)"
+# ---------------------------------------------------------------------------
+# The full statusline prints what Claude Code hands it and records each change
+# in a SQLite history. Two promises are checked here: the line survives
+# anything the history can do wrong, and the history holds what the line
+# showed -- once per change, not once per render.
+SLDB="$TMP/history/h.db"
+sltx=$(find "$TMP/bulk" -name '*.jsonl' -not -path '*/subagents/*' | head -1)
+slnow=$(date +%s)
+slpay() { # cost duration -> a full payload
+  printf '{"session_id":"sess-1","transcript_path":"%s","version":"9.9.9",
+  "model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"effort":{"level":"high"},
+  "workspace":{"current_dir":"%s","project_dir":"%s"},
+  "cost":{"total_cost_usd":%s,"total_duration_ms":%s,"total_api_duration_ms":3000,
+          "total_lines_added":10,"total_lines_removed":2},
+  "context_window":{"total_input_tokens":40000,"total_output_tokens":2000,
+                    "context_window_size":200000,"used_percentage":21},
+  "rate_limits":{"five_hour":{"used_percentage":23.4,"resets_at":%s},
+                 "seven_day":{"used_percentage":9,"resets_at":%s}}}' \
+    "$sltx" "$TMP" "$TMP" "$1" "$2" $((slnow + 8100)) $((slnow + 300000))
+}
+slsay() { # stdin-json [env...] -> $TMP/st.out (ANSI stripped), .raw, .err, .rc
+  local json=$1; shift
+  printf '%s' "$json" | bounded 20 env TS_HISTORY_DB="$SLDB" "$@" "$TS" statusline \
+    >"$TMP/st.raw" 2>"$TMP/st.err"
+  echo $? >"$TMP/st.rc"
+  sed $'s/\033\\[[0-9;]*m//g' "$TMP/st.raw" >"$TMP/st.out"
+}
+slrows() { # db -> row count, or "none" when the file was never created
+  [[ -f $1 ]] || { echo none; return; }
+  python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("select count(*) from snapshots").fetchone()[0])' "$1"
+}
+slline_ok() {
+  [[ $(cat "$TMP/st.out") == *"Opus 5.5"* && ! -s $TMP/st.err && $(cat "$TMP/st.rc") == 0 ]]
+}
+
+slsay "$(slpay 1.2345 5000)"
+line=$(cat "$TMP/st.out")
+missing=""
+for want in "Opus 5.5 (high)" "ctx 42k/200k 21%" "/t" "\$1.23" "5h 23% used(2h1" \
+            "7d 9% used(3d11h)" "/${TMP##*/}"; do
+  [[ $line == *"$want"* ]] || missing+=" [$want]"
+done
+if [[ -z $missing && ! -s $TMP/st.err && $(cat "$TMP/st.rc") == 0 ]]; then
+  ok "ts statusline: a full payload renders every segment"
+else
+  bad "ts statusline left out a segment:$missing" "got [$line] err [$(head -1 "$TMP/st.err")]"
+fi
+if grep -q $'\033\\[' "$TMP/st.raw"; then
+  ok "ts statusline: coloured although stdout is not a terminal"
+else
+  bad "ts statusline printed no colour; Claude Code renders it, so the line went flat"
+fi
+
+# The row holds what the line showed. Expected values are the payload's own.
+result=$(python3 - "$SLDB" <<'ROW'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1]); db.row_factory = sqlite3.Row
+r = db.execute("select * from snapshots").fetchone()
+want = {"session_id": "sess-1", "claude_version": "9.9.9", "model_id": "claude-opus-5-5",
+        "model_name": "Opus 5.5", "effort": "high", "ctx_tokens": 42000, "ctx_size": 200000,
+        "ctx_pct": 21, "cc_cost_usd": 1.2345, "duration_ms": 5000, "api_duration_ms": 3000,
+        "lines_added": 10, "lines_removed": 2, "five_hour_pct": 23.4, "seven_day_pct": 9}
+bad = ["%s=%r want %r" % (k, r[k], v) for k, v in want.items() if r[k] != v]
+for k in ("ts_context", "ctx_growth_per_turn", "recorded_at", "ts_version",
+          "five_hour_resets_at", "seven_day_resets_at", "transcript_path", "cwd"):
+    if r[k] is None:
+        bad.append("%s is empty" % k)
+print("|".join(bad))
+ROW
+)
+if [[ -z $result ]]; then
+  ok "history: the row holds the price, the session id and what the line showed"
+else
+  bad "history: the row disagrees with the payload" "${result//|/$'\n        '}"
+fi
+
+# Both branches of the dedupe: a re-render of the same state, and one where
+# only the wall clock moved, add nothing; a change in price adds a row.
+slsay "$(slpay 1.2345 5000)"; slsay "$(slpay 1.2345 9000)"
+n1=$(slrows "$SLDB")
+slsay "$(slpay 1.5 9000)"
+n2=$(slrows "$SLDB")
+if [[ $n1 == 1 && $n2 == 2 ]]; then
+  ok "history: one row per change -- a re-render adds none, a new price adds one"
+else
+  bad "history: dedupe is wrong" "after re-renders: $n1 rows (want 1); after a price change: $n2 (want 2)"
+fi
+
+# The line must survive the history: unwritable, not a database, turned off,
+# or written by a newer schema. Each must still print and stay silent.
+: > "$TMP/notadir"
+slsay "$(slpay 2 1)" TS_HISTORY_DB="$TMP/notadir/h.db"
+if slline_ok; then
+  ok "history: an unwritable database costs the row, not the line"
+else
+  bad "history: an unwritable database broke the line" "out [$(cat "$TMP/st.out")] err [$(head -1 "$TMP/st.err")]"
+fi
+for _ in {1..200}; do echo 'not a database at all'; done > "$TMP/garbage.db"
+slsay "$(slpay 2 1)" TS_HISTORY_DB="$TMP/garbage.db"
+if slline_ok; then
+  ok "history: a file that is not a database costs the row, not the line"
+else
+  bad "history: a corrupt database broke the line" "err [$(head -1 "$TMP/st.err")]"
+fi
+slsay "$(slpay 2 1)" TS_HISTORY=off TS_HISTORY_DB="$TMP/off.db"
+if slline_ok && [[ $(slrows "$TMP/off.db") == none ]]; then
+  ok "history: TS_HISTORY=off shows the line and writes nothing"
+else
+  bad "history: TS_HISTORY=off still recorded, or lost the line" "rows: $(slrows "$TMP/off.db")"
+fi
+python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute("create table snapshots (id integer)"); d.execute("pragma user_version = 99"); d.commit()' "$TMP/newer.db"
+slsay "$(slpay 2 1)" TS_HISTORY_DB="$TMP/newer.db"
+if slline_ok && [[ $(slrows "$TMP/newer.db") == 0 ]]; then
+  ok "history: a database from a newer version is left alone"
+else
+  bad "history: wrote into a newer version's database" "rows: $(slrows "$TMP/newer.db")"
+fi
+
+# Nothing to read: no output, no file, no complaint.
+for label in empty garbage; do
+  case $label in empty) payload="" ;; garbage) payload="not json {{{" ;; esac
+  slsay "$payload" TS_HISTORY_DB="$TMP/nothing.db"
+  if [[ ! -s $TMP/st.out && ! -s $TMP/st.err && $(cat "$TMP/st.rc") == 0 \
+        && $(slrows "$TMP/nothing.db") == none ]]; then
+    ok "ts statusline: $label stdin prints and records nothing, silently"
+  else
+    bad "ts statusline: $label stdin was not handled silently" \
+        "out [$(cat "$TMP/st.out")] err [$(head -1 "$TMP/st.err")] rc $(cat "$TMP/st.rc")"
+  fi
+done
+
+# The wrapper people copy into ~/.claude: it must find the newest ts under any
+# marketplace (the fake cache from section 8), and say why when it finds none.
+WRAP="$ROOT/scripts/statusline.sh"
+out=$(printf '{}' | bounded 20 env CLAUDE_CONFIG_DIR="$slc" bash "$WRAP" 2>"$TMP/wrap.err")
+if [[ $out == "0.10.0 statusline" && ! -s $TMP/wrap.err ]]; then
+  ok "statusline.sh: runs the newest ts across marketplace names"
+else
+  bad "statusline.sh did not run the newest ts" "got [$out]"
+fi
+out=$(slpay 1 1 | bounded 20 env TS_BIN="$TS" TS_HISTORY_DB="$TMP/wrap.db" bash "$WRAP" 2>"$TMP/wrap.err"; echo "rc=$?")
+if [[ $out == *"Opus 5.5"*"rc=0" && ! -s $TMP/wrap.err && $(slrows "$TMP/wrap.db") == 1 ]]; then
+  ok "statusline.sh: passes the session JSON through to ts statusline"
+else
+  bad "statusline.sh did not hand stdin to ts statusline" "got [$out] rows $(slrows "$TMP/wrap.db")"
+fi
+out=$(printf '{}' | bounded 20 env CLAUDE_CONFIG_DIR="$TMP/no-such-config" bash "$WRAP" 2>&1; echo "rc=$?")
+if [[ $out == "rc=0" ]]; then
+  ok "statusline.sh: no ts installed prints nothing, exits 0"
+else
+  bad "statusline.sh complained without a ts" "got [$out]"
+fi
+out=$(printf '{}' | bounded 20 env CLAUDE_CONFIG_DIR="$TMP/no-such-config" bash "$WRAP" --explain 2>&1)
+if [[ $out == *"none found"* ]]; then
+  ok "statusline.sh --explain says when no ts is installed"
+else
+  bad "statusline.sh --explain did not say why it is empty" "$out"
+fi
+slpay 1 1 | bounded 20 env TS_BIN="$TS" TS_HISTORY_DB="$TMP/explain.db" bash "$WRAP" --explain \
+  >"$TMP/explain.out" 2>&1
+if grep -q '^line: ' "$TMP/explain.out" && grep -q 'cc_cost_usd' "$TMP/explain.out" \
+   && [[ $(slrows "$TMP/explain.db") == none ]]; then
+  ok "statusline.sh --explain shows the line and the row, and writes nothing"
+else
+  bad "statusline.sh --explain did not explain, or recorded" "$(head -3 "$TMP/explain.out")"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n%s\n' "$(printf '%.0s-' {1..70})"
 printf '  %s%d passed%s   %s%d failed%s   %d skipped\n' \
   "$GREEN" "$PASS" "$OFF" \

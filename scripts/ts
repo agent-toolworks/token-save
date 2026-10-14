@@ -48,6 +48,9 @@ COMMANDS
   fixes            list | show <id> | apply <id> [--yes] | revert <id>
   share            A profile of this machine safe to send to someone else:
                    shape only, no paths, names, commands or contents.
+  statusline       The whole statusline, from the session JSON on stdin, and
+                   a row in the local history for each change it shows.
+                   --explain says what it read and would record.
   version          Print the version.
 
 COMMON OPTIONS  (audit, advise)
@@ -83,6 +86,9 @@ WHY THIS EXISTS
 ENVIRONMENT
   TS_TRANSCRIPT_DIR   Where transcripts live (default ~/.claude/projects).
   CLAUDE_CONFIG_DIR   Claude Code config dir (default ~/.claude).
+  TS_HISTORY_DB       Statusline history database
+                      (default $CLAUDE_CONFIG_DIR/token-save/history.db).
+  TS_HISTORY=off      Show the statusline without recording it.
   NO_COLOR            Disable colour.
 EOF
 }
@@ -116,6 +122,12 @@ case "$cmd" in
   fixes)
     have_python || die "ts: python3 is required and was not found on PATH"
     exec python3 "$LIB/fixes.py" "$@"
+    ;;
+  statusline)
+    # Runs inside a prompt: without python3 it prints nothing rather than an
+    # error, like everything else on this path.
+    have_python || exit 0
+    exec python3 "$LIB/cmd_statusline.py" "$@"
     ;;
   share)
     have_python || die "ts: python3 is required and was not found on PATH"

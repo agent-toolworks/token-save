@@ -68,6 +68,7 @@ Nothing is sent anywhere. There is no network code in this repository.
 | What can be changed mechanically? | `ts fixes list` |
 | Preview / apply / undo one | `ts fixes show\|apply\|revert <id>` |
 | Send my numbers to someone, safely | `ts share` |
+| A full statusline, and a history of what it showed | `ts statusline` — see [docs/statusline.md](docs/statusline.md) |
 
 `--json` on `audit`, `advise` and `doctor` for machine-readable output.
 
@@ -102,6 +103,15 @@ is your call, and the output says so every time instead of pretending
 otherwise.
 
 ### In your statusline
+
+**The whole line.** token-save ships a complete statusline: directory and branch,
+model and effort, context, the `ts now` segment below, session cost, and the 5h
+and 7d quota. It also records each change into a local SQLite history, because
+the quota and Claude Code's cost figure reach nothing else that keeps them
+(#41). [docs/statusline.md](docs/statusline.md) covers installing it, what a
+row holds, querying it, and turning recording off.
+
+**Only the segment**, for a statusline you already have:
 
 ```sh
 ts now --statusline        # ->  423K +530/t clear>1t
@@ -265,7 +275,10 @@ so the ranking can never disagree with its own numbers.
   distribution says it is.
 - **It does not estimate money.** Prices change and vary by plan; it reports
   *cost units* (tokens re-weighted by what each kind costs relative to one
-  input token), which is what actually ranks the findings.
+  input token), which is what actually ranks the findings. The statusline
+  shows and records a dollar figure, but it is Claude Code's own estimate,
+  passed through as reported and stored as `cc_cost_usd` so the column says
+  whose number it is.
 
 ## Fixes that are safe to script
 
@@ -341,7 +354,9 @@ refused rather than overwritten and that the statusline cannot hang — the
 command classifier behind the Bash leaderboard, detector coverage (every entry
 in the catalogue must have a fixture that fires it, or a named exemption),
 version agreement, redaction against a planted canary, the live signal's
-arithmetic, and argument validation. It also checks that the catalogue listed
+arithmetic, argument validation, and the statusline and its history (every
+segment rendered, one row per change, and a line that survives a broken
+database). It also checks that the catalogue listed
 above is the one the code runs.
 
 ## Licence

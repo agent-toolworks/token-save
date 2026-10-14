@@ -46,6 +46,7 @@ Every recommendation `ts advise` makes is ranked by this, not by raw size.
 |---|---|
 | What is this session costing right now? | `ts now` |
 | ...as a statusline fragment | `ts now --statusline` |
+| ...as a whole statusline, recording a history | `ts statusline` |
 | Where did my tokens go? | `ts audit` |
 | ...for one project only | `ts audit --project '*myrepo*'` |
 | ...the heaviest sessions | `ts audit --sessions` |
@@ -126,6 +127,13 @@ point them at `scripts/statusline-snippet.sh` in this plugin. It works as a
 whole statusline on its own, or the marked block can be pasted into an
 existing one. It degrades to printing nothing, so it cannot break a working
 prompt.
+
+If they want the whole line (directory, branch, model, effort, context, cost, 5h
+and 7d quota) or a record of usage over time, point them at
+`docs/statusline.md`: `scripts/statusline.sh` is the full statusline, and it
+records each change into `~/.claude/token-save/history.db`. The person edits
+their own `settings.json` and copies the file; offer the steps, and do not
+replace an existing statusline without asking.
 
 ## Setup
 
