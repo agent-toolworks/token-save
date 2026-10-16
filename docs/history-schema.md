@@ -18,7 +18,7 @@ the writer itself uses:
 ```json
 {
   "tool_version": "0.25.0",
-  "schema_version": 2,
+  "schema_version": 3,
   "database": "/Users/you/.claude/token-save/history.db",
   "table": "snapshots",
   "columns": [
@@ -66,7 +66,7 @@ statusline's own working state and is not part of this contract.
 
 ## Versioning
 
-`PRAGMA user_version` is the schema version. It is `2` today.
+`PRAGMA user_version` is the schema version. It is `3` today.
 
 - **Columns are only ever added.** A column is never renamed, removed, re-typed
   or given a new meaning. When columns are added, `user_version` goes up, and
@@ -83,6 +83,7 @@ statusline's own working state and is not part of this contract.
 |---|---|
 | 1 | the first 26 columns, `recorded_at` to `ts_version` |
 | 2 | every remaining payload field, `rate_limits_observed_at`, `source`, and the drift canary (`unknown_keys`, `raw_payload`) |
+| 3 | the fields Claude Code added since: `scratchpad_dir`, `workspace.repo.*`, `prompt_cache.*` |
 
 ## What a row is
 
@@ -112,10 +113,14 @@ writes nothing, and nor does the wall clock moving on its own (see
   account. A column it did not send is `NULL`, never `0`. `clear_breakeven_turns`
   is also `NULL` when clearing would never pay for itself.
 
-**Drift.** When the payload has a field this version has no column for, its
-dotted path goes into `unknown_keys`, and that row alone also carries the
-whole payload in `raw_payload`. A Claude Code upgrade that adds a field shows
-up there without the raw JSON being stored on every row.
+**Drift.** When the payload has a field this version has no column for, or a
+field whose value is not the type its column holds (a string where a number
+belongs, say), its dotted path goes into `unknown_keys`, and that row alone
+also carries the whole payload in `raw_payload`. A Claude Code upgrade that
+adds or changes a field shows up there, rather than as a silent `NULL`,
+without the raw JSON being stored on every row. Fields whose keys vary
+(`added_dirs`, `prompt_cache.miss_causes`, `prompt_cache.last_miss_cause`) are
+stored whole as JSON, so new keys inside them are not drift.
 
 ## Columns
 
@@ -134,7 +139,7 @@ up there without the raw JSON being stored on every row.
 | `effort` | TEXT | reasoning effort level: `low`, `medium`, `high`, ... |
 | `ctx_tokens` | INTEGER | `ctx_input_tokens + ctx_output_tokens` |
 | `ctx_size` | INTEGER | context window size, in tokens |
-| `ctx_pct` | REAL | context window used, 0 to 100 |
+| `ctx_pct` | REAL | context window used, 0 to 100, as Claude Code reported it. Never derived: `NULL` on a first render, where the payload has none |
 | `ts_context` | INTEGER | tokens in context, read from the transcript by `ts now`; `NULL` on imported rows |
 | `ctx_growth_per_turn` | REAL | tokens added to context per turn, recently (`ts now`) |
 | `clear_breakeven_turns` | REAL | turns until clearing the session pays for itself (`ts now`); `NULL` if never |
@@ -168,6 +173,24 @@ up there without the raw JSON being stored on every row.
 | `source` | TEXT | what wrote the row: `statusline`, or `import` for `ts history import` |
 | `unknown_keys` | TEXT | JSON array of payload fields this version has no column for; `NULL` when there are none |
 | `raw_payload` | TEXT | the whole payload as JSON, only on rows where `unknown_keys` is set |
+| `scratchpad_dir` | TEXT | the session's scratchpad directory |
+| `repo_host` | TEXT | `workspace.repo.host`, e.g. `github.com` |
+| `repo_owner` | TEXT | `workspace.repo.owner` |
+| `repo_name` | TEXT | `workspace.repo.name` |
+| `prompt_cache_warm` | INTEGER | `1` when Claude Code reports the prompt cache warm, `0` when cold |
+| `prompt_cache_caching_observed` | INTEGER | `prompt_cache.caching_observed`, `1` or `0` |
+| `prompt_cache_ttl` | TEXT | the prompt cache TTL as reported: `5m` or `1h` |
+| `prompt_cache_expires_at` | INTEGER | when the cached prefix expires, in epoch seconds (converted from whichever form the payload used) |
+| `prompt_cache_requests` | INTEGER | `prompt_cache.requests` |
+| `prompt_cache_misses` | INTEGER | `prompt_cache.misses` |
+| `prompt_cache_expected_rebuilds` | INTEGER | `prompt_cache.expected_rebuilds` |
+| `prompt_cache_hit_ratio` | REAL | `prompt_cache.hit_ratio`, as reported |
+| `prompt_cache_write_tokens` | INTEGER | `prompt_cache.cache_write_tokens` |
+| `prompt_cache_miss_recache_tokens` | INTEGER | `prompt_cache.miss_recache_tokens` |
+| `prompt_cache_last_miss_at` | INTEGER | `prompt_cache.last_miss_at`, in epoch seconds |
+| `prompt_cache_recache_tokens_if_cold` | INTEGER | `prompt_cache.recache_tokens_if_cold` |
+| `prompt_cache_miss_causes` | TEXT | `prompt_cache.miss_causes`, as JSON; its keys vary |
+| `prompt_cache_last_miss_cause` | TEXT | `prompt_cache.last_miss_cause`, as JSON |
 
 `scripts/verify` checks that this table names the same columns, with the same
 types and in the same order, as the writer, so the two cannot drift apart.

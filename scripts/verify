@@ -3541,7 +3541,7 @@ fi
 python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute("create table snapshots (id integer primary key, recorded_at text, session_id text)"); d.execute("insert into snapshots (recorded_at, session_id) values (\"2026-01-01T00:00:00Z\", \"old\")"); d.commit()' "$TMP/older.db"
 slsay "$(slpay 2 1)" TS_HISTORY_DB="$TMP/older.db"
 result=$(python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute("pragma user_version").fetchone()[0], d.execute("select count(*), count(cc_cost_usd) from snapshots").fetchone())' "$TMP/older.db")
-if slline_ok && [[ $result == "2 (2, 1)" ]]; then
+if slline_ok && [[ $result == "3 (2, 1)" ]]; then
   ok "history: an older table gains the new columns and keeps its rows"
 else
   bad "history: did not bring an older table up to date" "got [$result]"
@@ -3718,6 +3718,59 @@ if [[ $rc1 == 0 && $rows == "$want" ]] && grep -q "no UTC offset" "$TMP/imp1.out
   ok "ts history import: UTC from any offset, deduped, bad lines refused, re-run writes nothing"
 else
   bad "ts history import went wrong" "rows [$rows] $(grep -E 'written|refused|line' "$TMP/imp1.out" "$TMP/imp2.out")"
+fi
+
+# The second review: fields Claude Code added since (schema 3), warmth from
+# the payload when it states it, and ctx_pct never derived.
+pc() { # $1 warm, $2 seconds until expiry -> a prompt_cache member
+  printf ',"scratchpad_dir":"/tmp/s","prompt_cache":{"warm":%s,"caching_observed":true,"ttl":"5m","expires_at":%s,
+  "requests":12,"misses":1,"expected_rebuilds":0,"hit_ratio":0.97,"cache_write_tokens":3000,
+  "miss_recache_tokens":500,"last_miss_at":%s,"recache_tokens_if_cold":90000,
+  "miss_causes":{"ttl_expired_1h":1},"last_miss_cause":{"causes":["ttl"]}}' \
+    "$1" $((slnow + $2)) $((slnow - 100))
+}
+repo=',"workspace":{"current_dir":"'"$TMP"'","project_dir":"'"$TMP"'","added_dirs":[],"repo":{"host":"github.com","owner":"o","name":"n"}}'
+V2TX=$(v2tx 1h 5)
+slsay "$(v2pay dddddddd-1 20 50 "$(pc true 600)$repo")" TS_HISTORY_DB="$V2/s3.db"
+l3=$(cat "$TMP/st.out")
+r3=$(v2db "$V2/s3.db" "select scratchpad_dir, repo_host, repo_owner, repo_name, prompt_cache_warm, prompt_cache_caching_observed, prompt_cache_ttl, prompt_cache_expires_at = $((slnow + 600)), prompt_cache_requests, prompt_cache_misses, prompt_cache_expected_rebuilds, prompt_cache_hit_ratio, prompt_cache_write_tokens, prompt_cache_miss_recache_tokens, prompt_cache_last_miss_at = $((slnow - 100)), prompt_cache_recache_tokens_if_cold, prompt_cache_miss_causes, prompt_cache_last_miss_cause, unknown_keys, raw_payload from snapshots")
+want='/tmp/s|github.com|o|n|1|1|5m|1|12|1|0|0.97|3000|500|1|90000|{"ttl_expired_1h": 1}|{"causes": ["ttl"]}||'
+if [[ $r3 == "$want" ]]; then
+  ok "history: prompt_cache, repo and scratchpad fields have columns, and trip no canary"
+else
+  bad "history: schema 3 fields not recorded as expected" "got  [$r3]
+        want [$want]"
+fi
+# The transcript says 1h and was written 5s ago, which alone would show
+# nothing; the payload says 5m, expiring in 10 minutes.
+if [[ $l3 == *"warm 10m"* || $l3 == *"warm 9m"* ]]; then
+  ok "warmth: prompt_cache.expires_at is preferred over the transcript tail"
+else
+  bad "warmth: the payload's prompt_cache was not used" "got [$l3]"
+fi
+slsay "$(v2pay dddddddd-1 20 50 "$(pc false 600)")" TS_HISTORY_DB="$V2/s3b.db"
+if [[ $(cat "$TMP/st.out") == *COLD* ]]; then
+  ok "warmth: prompt_cache.warm false is COLD whatever expires_at says"
+else
+  bad "warmth: warm=false was not shown as COLD" "got [$(cat "$TMP/st.out")]"
+fi
+# A field of the wrong type is drift, not a silent NULL.
+slsay "$(v2pay dddddddd-2 20 50 ',"scratchpad_dir":42')" TS_HISTORY_DB="$V2/s3c.db"
+r=$(v2db "$V2/s3c.db" "select scratchpad_dir is null, unknown_keys, raw_payload is not null from snapshots")
+if [[ $r == '1|["scratchpad_dir"]|1' ]]; then
+  ok "history: a field of the wrong type is listed in unknown_keys"
+else
+  bad "history: type drift was not reported" "got [$r]"
+fi
+# First render: used_percentage null with 0 tokens is not a measured 0%.
+printf '{"session_id":"eeeeeeee-1","model":{"display_name":"Opus 5.5"},"context_window":{"used_percentage":null,"total_input_tokens":0,"total_output_tokens":0,"context_window_size":200000}}' \
+  > "$V2/first.json"
+slsay "$(cat "$V2/first.json")" TS_HISTORY_DB="$V2/s3d.db"
+r=$(v2db "$V2/s3d.db" "select ctx_pct is null, ctx_tokens from snapshots")
+if [[ $r == "1|0" ]] && slline_ok; then
+  ok "history: ctx_pct is NULL when the payload reports none, never a derived 0"
+else
+  bad "history: ctx_pct was derived" "got [$r]"
 fi
 
 # ---------------------------------------------------------------------------

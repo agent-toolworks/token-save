@@ -192,13 +192,14 @@ def _prune(directory, now_s):
         pass
 
 
-def transcript_reading(transcript, write_cache: bool = True):
+def transcript_reading(transcript, write_cache: bool = True, need_ttl: bool = True):
     """(`ts now` reading, cache TTL, seconds idle) for the transcript.
 
     The first two depend only on the file's contents, so they are cached
     against its (size, mtime): a session re-rendering on a timer while it
     sits idle gets them for one stat and one small read. Idle time is the
-    transcript's age, so it is measured on every render.
+    transcript's age, so it is measured on every render. need_ttl=False skips
+    the tail read, for a payload that states the TTL itself.
     """
     if not transcript:
         return None, None, None
@@ -214,10 +215,13 @@ def transcript_reading(transcript, write_cache: bool = True):
             with open(cf, "rb") as fh:
                 c = json.loads(fh.read().decode("utf-8"))
             if c.get("key") == key:
+                if need_ttl and "ttl" not in c:
+                    return c.get("now"), cache_ttl(transcript), idle
                 return c.get("now"), c.get("ttl"), idle
         except (OSError, ValueError, AttributeError):
             pass
-    now, ttl = ts_now(transcript), cache_ttl(transcript)
+    now = ts_now(transcript)
+    ttl = cache_ttl(transcript) if need_ttl else None
     # A missing reading can be a budget that ran out, which the next render
     # may not hit: only an answer is worth keeping.
     if cf and now is not None and write_cache:
@@ -229,11 +233,50 @@ def transcript_reading(transcript, write_cache: bool = True):
                 _prune(d, time.time())
             tmp = "%s.%d.tmp" % (cf, os.getpid())
             with open(tmp, "wb") as fh:
-                fh.write(json.dumps({"key": key, "now": now, "ttl": ttl}).encode("utf-8"))
+                entry = {"key": key, "now": now}
+                if need_ttl:
+                    entry["ttl"] = ttl
+                fh.write(json.dumps(entry).encode("utf-8"))
             os.replace(tmp, cf)
         except Exception:
             pass
     return now, ttl, idle
+
+
+def _ttl_seconds(v):
+    """"5m" / "1h" / "300s" -> seconds, or None."""
+    import re
+    m = re.fullmatch(r"\s*(\d+)\s*([smh])\s*", v) if isinstance(v, str) else None
+    return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600}[m.group(2)] if m else None
+
+
+def warmth(p, tail_ttl, idle, now_s=None):
+    """(ttl, seconds left) for the cached prefix, or None to show nothing.
+
+    Newer Claude Code states it in `prompt_cache`: `expires_at` is absolute,
+    so the countdown is right on a timer re-render of an idle session with no
+    idle-time arithmetic, and `warm: false` is COLD outright. Without them the
+    TTL comes from the transcript tail (cache_ttl) and the countdown from the
+    transcript's age, hidden for the first minute -- mid-turn.
+    """
+    now_s = time.time() if now_s is None else now_s
+    pc = _get(p, "prompt_cache")
+    pc = pc if isinstance(pc, dict) else {}
+    ttl = _ttl_seconds(pc.get("ttl")) or tail_ttl
+    if pc.get("warm") is False:
+        return ttl, 0
+    exp = history.to_epoch(pc.get("expires_at"))
+    if exp is not None:
+        return ttl, exp - now_s
+    if ttl and idle is not None and idle >= WARM_HIDDEN_S:
+        return ttl, ttl - idle
+    return None
+
+
+def payload_states_ttl(p) -> bool:
+    pc = _get(p, "prompt_cache")
+    return isinstance(pc, dict) and (_ttl_seconds(pc.get("ttl")) is not None
+                                     or history.to_epoch(pc.get("expires_at")) is not None)
 
 
 # ---- rendering -------------------------------------------------------------
@@ -340,7 +383,7 @@ def _context(row) -> str:
     return out
 
 
-def _request(row, ttl, idle) -> str:
+def _request(row, warm) -> str:
     """The last request and the cache behind it: `cache 97% msgs 4.2k warm 48m`.
 
     The hit rate is of the last request alone, so a sudden drop -- a busted
@@ -356,12 +399,12 @@ def _request(row, ttl, idle) -> str:
         parts.append("%s %s" % (R.dim("cache"), c("%d%%" % int(hit))))
     if inp is not None:
         parts.append("%s %s" % (R.dim("msgs"), fmt_tokens1(inp)))
-    if ttl and idle is not None and idle >= WARM_HIDDEN_S:
-        left = ttl - idle
+    if warm:
+        ttl, left = warm
         if left <= 0:
             parts.append(R.red("COLD"))
         else:
-            c = R.yellow if left <= ttl * 0.25 else R.green
+            c = R.yellow if ttl and left <= ttl * 0.25 else R.green
             mins = int(left // 60)
             parts.append("%s %s" % (R.dim("warm"), c("%dm" % mins if mins else "<1m")))
     return " ".join(parts)
@@ -384,7 +427,7 @@ def _quota(label, pct, resets_at, borrowed=False) -> str:
     return out + R.dim("(%s)" % until) if until else out
 
 
-def render(row: dict, now: dict, ttl=None, idle=None, quota: dict = None) -> str:
+def render(row: dict, now: dict, warm=None, quota: dict = None) -> str:
     sep = " " + R.dim("|") + " "
     parts = []
     where = " ".join(x for x in (R.cyan(fmt_dir(row["cwd"])) if row["cwd"] else "",
@@ -402,7 +445,7 @@ def render(row: dict, now: dict, ttl=None, idle=None, quota: dict = None) -> str
         m += " " + R.magenta("✻")
     parts.append(m)
     parts.append(_context(row))
-    req = _request(row, ttl, idle)
+    req = _request(row, warm)
     if req:
         parts.append(req)
     if now:
@@ -420,15 +463,16 @@ def render(row: dict, now: dict, ttl=None, idle=None, quota: dict = None) -> str
 # ---- main ------------------------------------------------------------------
 
 def collect(p, write_cache: bool = True):
-    """Everything one render needs: (row, now, ttl, idle, quota)."""
+    """Everything one render needs: (row, now, warm, quota)."""
     transcript = _str(p.get("transcript_path"))
-    now, ttl, idle = transcript_reading(transcript, write_cache)
+    now, ttl, idle = transcript_reading(transcript, write_cache,
+                                        need_ttl=not payload_states_ttl(p))
     row = history.row_from_payload(
         p, now, git_branch(_str(_get(p, "workspace", "current_dir")) or _str(p.get("cwd"))))
     row["rate_limits_observed_at"] = history.observed_at(
         row, history.previous(row["session_id"]))
     quota = limits.shown(row, limits.read())
-    return row, now, ttl, idle, quota
+    return row, now, warmth(p, ttl, idle), quota
 
 
 def explain(p) -> int:
@@ -439,14 +483,17 @@ def explain(p) -> int:
         print("history:    %s" % history.describe())
         print("limits:     %s" % (limits.path() or "off"))
         return 0
-    row, now, ttl, idle, quota = collect(p, write_cache=False)
-    print("line:       %s" % render(row, now, ttl, idle, quota))
+    row, now, warm, quota = collect(p, write_cache=False)
+    print("line:       %s" % render(row, now, warm, quota))
     if not now:
         print("ts now:     no segment -- transcript missing, empty, or slower than %.1fs"
               % TRANSCRIPT_BUDGET_S)
-    print("warmth:     ttl %s, idle %s" % (
-        "%ds" % ttl if ttl else "unknown (no cache write in the last %d KB)" % (TAIL_BYTES // 1024),
-        "%ds" % idle if idle is not None else "unknown"))
+    if payload_states_ttl(p):
+        src = "from the payload's prompt_cache"
+    else:
+        src = "from the transcript tail (the payload has no prompt_cache.ttl or expires_at)"
+    print("warmth:     %s; %s" % (
+        "ttl %ss, %ds left" % (warm[0] or "?", warm[1]) if warm else "not shown", src))
     print("history:    %s" % history.describe())
     if not row["session_id"]:
         print("            this payload has no session_id or transcript_path: not recorded")
@@ -481,8 +528,8 @@ def main(argv=None) -> int:
         return 0
     row = None
     try:
-        row, now, ttl, idle, quota = collect(p)
-        sys.stdout.write(render(row, now, ttl, idle, quota))
+        row, now, warm, quota = collect(p)
+        sys.stdout.write(render(row, now, warm, quota))
         sys.stdout.flush()
     except Exception:
         pass

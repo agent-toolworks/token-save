@@ -39,7 +39,7 @@ import sqlite3
 # Bumped on any change to COLUMNS. A database written by a NEWER version is
 # left alone rather than written with a narrower row: two versions can be
 # installed side by side, and the older one must not damage the newer's data.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # (column, type, what it is). The order is the table's column order, and new
 # columns only ever go at the end.
@@ -92,6 +92,25 @@ COLUMNS = [
     ("source", "TEXT", "what wrote the row: statusline or import"),
     ("unknown_keys", "TEXT", "JSON array of payload fields with no column; NULL when none"),
     ("raw_payload", "TEXT", "the payload as JSON, only on rows where unknown_keys is set"),
+    # -- schema 3 --
+    ("scratchpad_dir", "TEXT", "the session's scratchpad directory"),
+    ("repo_host", "TEXT", "workspace.repo.host"),
+    ("repo_owner", "TEXT", "workspace.repo.owner"),
+    ("repo_name", "TEXT", "workspace.repo.name"),
+    ("prompt_cache_warm", "INTEGER", "1 when Claude Code reports the prompt cache warm"),
+    ("prompt_cache_caching_observed", "INTEGER", "prompt_cache.caching_observed, 1 or 0"),
+    ("prompt_cache_ttl", "TEXT", "prompt cache TTL as reported: 5m or 1h"),
+    ("prompt_cache_expires_at", "INTEGER", "when the cached prefix expires, epoch seconds"),
+    ("prompt_cache_requests", "INTEGER", "prompt_cache.requests"),
+    ("prompt_cache_misses", "INTEGER", "prompt_cache.misses"),
+    ("prompt_cache_expected_rebuilds", "INTEGER", "prompt_cache.expected_rebuilds"),
+    ("prompt_cache_hit_ratio", "REAL", "prompt_cache.hit_ratio, as reported"),
+    ("prompt_cache_write_tokens", "INTEGER", "prompt_cache.cache_write_tokens"),
+    ("prompt_cache_miss_recache_tokens", "INTEGER", "prompt_cache.miss_recache_tokens"),
+    ("prompt_cache_last_miss_at", "INTEGER", "prompt_cache.last_miss_at, epoch seconds"),
+    ("prompt_cache_recache_tokens_if_cold", "INTEGER", "prompt_cache.recache_tokens_if_cold"),
+    ("prompt_cache_miss_causes", "TEXT", "prompt_cache.miss_causes, as JSON"),
+    ("prompt_cache_last_miss_cause", "TEXT", "prompt_cache.last_miss_cause, as JSON"),
 ]
 NAMES = [c[0] for c in COLUMNS]
 
@@ -109,27 +128,75 @@ DEDUPE_KEY = [n for n in NAMES if n not in DEDUPE_EXCLUDED]
 RATE_LIMIT_KEY = ("five_hour_pct", "five_hour_resets_at",
                   "seven_day_pct", "seven_day_resets_at")
 
-# Every payload leaf with a column (or, for hook_event_name, deliberately none:
-# it names the hook and is the same on every render). Anything else is drift.
-KNOWN_LEAVES = frozenset({
-    "hook_event_name",
-    "session_id", "session_name", "prompt_id", "transcript_path", "cwd", "version",
-    "model.id", "model.display_name",
-    "workspace.current_dir", "workspace.project_dir", "workspace.added_dirs",
-    "output_style.name", "effort.level", "thinking.enabled", "fast_mode",
-    "exceeds_200k_tokens",
-    "cost.total_cost_usd", "cost.total_duration_ms", "cost.total_api_duration_ms",
-    "cost.total_lines_added", "cost.total_lines_removed",
-    "context_window.total_input_tokens", "context_window.total_output_tokens",
-    "context_window.context_window_size", "context_window.used_percentage",
-    "context_window.remaining_percentage",
-    "context_window.current_usage.input_tokens",
-    "context_window.current_usage.output_tokens",
-    "context_window.current_usage.cache_creation_input_tokens",
-    "context_window.current_usage.cache_read_input_tokens",
-    "rate_limits.five_hour.used_percentage", "rate_limits.five_hour.resets_at",
-    "rate_limits.seven_day.used_percentage", "rate_limits.seven_day.resets_at",
-})
+# Every payload field with a column: (dotted path, column, kind). The kind is
+# what the column holds, and a value of any other type is drift, reported in
+# unknown_keys rather than stored as NULL as if it were missing. A "json"
+# field is stored whole, so the keys under it can vary without tripping the
+# canary. Columns not listed here are derived (cwd, ctx_tokens) or not from
+# the payload at all.
+FIELDS = [
+    ("session_id", "session_id", "str"),
+    ("transcript_path", "transcript_path", "str"),
+    ("version", "claude_version", "str"),
+    ("workspace.project_dir", "project_dir", "str"),
+    ("model.id", "model_id", "str"),
+    ("model.display_name", "model_name", "str"),
+    ("effort.level", "effort", "str"),
+    ("context_window.context_window_size", "ctx_size", "int"),
+    ("context_window.used_percentage", "ctx_pct", "num"),
+    ("cost.total_cost_usd", "cc_cost_usd", "num"),
+    ("cost.total_duration_ms", "duration_ms", "int"),
+    ("cost.total_api_duration_ms", "api_duration_ms", "int"),
+    ("cost.total_lines_added", "lines_added", "int"),
+    ("cost.total_lines_removed", "lines_removed", "int"),
+    ("rate_limits.five_hour.used_percentage", "five_hour_pct", "num"),
+    ("rate_limits.five_hour.resets_at", "five_hour_resets_at", "int"),
+    ("rate_limits.seven_day.used_percentage", "seven_day_pct", "num"),
+    ("rate_limits.seven_day.resets_at", "seven_day_resets_at", "int"),
+    ("session_name", "session_name", "str"),
+    ("prompt_id", "prompt_id", "str"),
+    ("workspace.current_dir", "workspace_current_dir", "str"),
+    ("cwd", "payload_cwd", "str"),
+    ("workspace.added_dirs", "added_dirs", "json"),
+    ("thinking.enabled", "thinking_enabled", "bool"),
+    ("fast_mode", "fast_mode", "bool"),
+    ("output_style.name", "output_style", "str"),
+    ("context_window.remaining_percentage", "ctx_remaining_pct", "num"),
+    ("context_window.total_input_tokens", "ctx_input_tokens", "int"),
+    ("context_window.total_output_tokens", "ctx_output_tokens", "int"),
+    ("context_window.current_usage.input_tokens", "last_input_tokens", "int"),
+    ("context_window.current_usage.output_tokens", "last_output_tokens", "int"),
+    ("context_window.current_usage.cache_creation_input_tokens", "last_cache_creation_tokens", "int"),
+    ("context_window.current_usage.cache_read_input_tokens", "last_cache_read_tokens", "int"),
+    ("exceeds_200k_tokens", "exceeds_200k_tokens", "bool"),
+    ("scratchpad_dir", "scratchpad_dir", "str"),
+    ("workspace.repo.host", "repo_host", "str"),
+    ("workspace.repo.owner", "repo_owner", "str"),
+    ("workspace.repo.name", "repo_name", "str"),
+    ("prompt_cache.warm", "prompt_cache_warm", "bool"),
+    ("prompt_cache.caching_observed", "prompt_cache_caching_observed", "bool"),
+    ("prompt_cache.ttl", "prompt_cache_ttl", "str"),
+    ("prompt_cache.expires_at", "prompt_cache_expires_at", "epoch"),
+    ("prompt_cache.requests", "prompt_cache_requests", "int"),
+    ("prompt_cache.misses", "prompt_cache_misses", "int"),
+    ("prompt_cache.expected_rebuilds", "prompt_cache_expected_rebuilds", "int"),
+    ("prompt_cache.hit_ratio", "prompt_cache_hit_ratio", "num"),
+    ("prompt_cache.cache_write_tokens", "prompt_cache_write_tokens", "int"),
+    ("prompt_cache.miss_recache_tokens", "prompt_cache_miss_recache_tokens", "int"),
+    ("prompt_cache.last_miss_at", "prompt_cache_last_miss_at", "epoch"),
+    ("prompt_cache.recache_tokens_if_cold", "prompt_cache_recache_tokens_if_cold", "int"),
+    ("prompt_cache.miss_causes", "prompt_cache_miss_causes", "json"),
+    ("prompt_cache.last_miss_cause", "prompt_cache_last_miss_cause", "json"),
+]
+# Recognised and deliberately not kept: it names the hook, the same on every
+# render.
+IGNORED_LEAVES = frozenset({"hook_event_name"})
+_JSON_PATHS = tuple(f[0] for f in FIELDS if f[2] == "json")
+_PATHS = frozenset(f[0] for f in FIELDS)
+
+# The quota reading as one value: all four arrive in the same API response.
+RATE_LIMIT_KEY = ("five_hour_pct", "five_hour_resets_at",
+                  "seven_day_pct", "seven_day_resets_at")
 
 # How long to wait for another session's write. Several sessions render at
 # once; a writer holds the lock for well under a millisecond, so this only
@@ -180,8 +247,44 @@ def _str(v):
     return v if isinstance(v, str) and v else None
 
 
-def _bool(v):
-    return None if not isinstance(v, bool) else int(v)
+def to_epoch(v):
+    """Epoch seconds from a number (seconds, or milliseconds when it is far too
+    large to be seconds) or an ISO 8601 string with an offset; else None."""
+    n = _num(v)
+    if n is not None:
+        return int(n / 1000) if n > 1e11 else int(n)
+    if isinstance(v, str):
+        import datetime as _dt
+        s = v.strip()
+        s = s[:-1] + "+00:00" if s.endswith(("Z", "z")) else s
+        try:
+            t = _dt.datetime.fromisoformat(s)
+        except ValueError:
+            return None
+        return int(t.timestamp()) if t.tzinfo else None
+    return None
+
+
+def _convert(kind, v):
+    """(value, ok). ok is False when v is present but not of the kind."""
+    if v is None:
+        return None, True
+    if kind == "str":
+        return (v or None, True) if isinstance(v, str) else (None, False)
+    if kind == "int":
+        n = _int(v)
+        return n, n is not None
+    if kind == "num":
+        n = _num(v)
+        return n, n is not None
+    if kind == "bool":
+        return (int(v), True) if isinstance(v, bool) else (None, False)
+    if kind == "json":
+        return json.dumps(v, ensure_ascii=False), True
+    if kind == "epoch":
+        n = to_epoch(v)
+        return n, n is not None
+    raise ValueError(kind)
 
 
 def payload_leaves(p, prefix=""):
@@ -194,79 +297,53 @@ def payload_leaves(p, prefix=""):
             yield path
 
 
+def _known(path) -> bool:
+    return path in _PATHS or path in IGNORED_LEAVES or \
+        any(path.startswith(j + ".") for j in _JSON_PATHS)
+
+
 def row_from_payload(p: dict, now: dict = None, branch=None,
                      recorded_at: str = None, source: str = "statusline") -> dict:
     """The history row for one payload: every field it carries, plus the
     `ts now` reading and branch when the caller has them. The importer passes
     neither, and they stay NULL."""
-    cw = _get(p, "context_window") or {}
-    cu = _get(cw, "current_usage") or {}
-    ctx_size = _int(_get(cw, "context_window_size"))
-    ctx_in, ctx_out = _int(_get(cw, "total_input_tokens")), _int(_get(cw, "total_output_tokens"))
-    ctx_tokens = None
-    if ctx_in is not None or ctx_out is not None:
-        ctx_tokens = (ctx_in or 0) + (ctx_out or 0)
-    ctx_pct = _num(_get(cw, "used_percentage"))
-    if ctx_pct is None and ctx_tokens is not None and ctx_size:
-        ctx_pct = ctx_tokens * 100.0 / ctx_size
+    row = {n: None for n in NAMES}
+    drift = []
+    for path, col, kind in FIELDS:
+        v = p
+        for k in path.split("."):
+            v = v.get(k) if isinstance(v, dict) else None
+        row[col], ok = _convert(kind, v)
+        if not ok:
+            drift.append(path)
 
-    transcript = _str(p.get("transcript_path"))
-    session = _str(p.get("session_id"))
-    if not session and transcript:
+    if not row["session_id"] and row["transcript_path"]:
         # The transcript is named after the session.
-        session = os.path.splitext(os.path.basename(transcript))[0] or None
+        row["session_id"] = os.path.splitext(
+            os.path.basename(row["transcript_path"]))[0] or None
+    row["cwd"] = row["workspace_current_dir"] or row["payload_cwd"]
+    if row["ctx_input_tokens"] is not None or row["ctx_output_tokens"] is not None:
+        row["ctx_tokens"] = (row["ctx_input_tokens"] or 0) + (row["ctx_output_tokens"] or 0)
+    # ctx_pct is what Claude Code reported, never derived: on a session's
+    # first render it sends used_percentage null with 0 tokens, and a derived
+    # 0.0 there would claim a measurement nobody made.
 
-    added = _get(p, "workspace", "added_dirs")
-    unknown = sorted(k for k in payload_leaves(p) if k not in KNOWN_LEAVES)
     be = now.get("breakeven_turns") if now else None
-    return {
+    row.update({
         "recorded_at": recorded_at or utc_now(),
-        "session_id": session,
-        "transcript_path": transcript,
-        "claude_version": _str(p.get("version")),
-        "cwd": _str(_get(p, "workspace", "current_dir")) or _str(p.get("cwd")),
-        "project_dir": _str(_get(p, "workspace", "project_dir")),
         "git_branch": branch,
-        "model_id": _str(_get(p, "model", "id")),
-        "model_name": _str(_get(p, "model", "display_name")),
-        "effort": _str(_get(p, "effort", "level")),
-        "ctx_tokens": ctx_tokens,
-        "ctx_size": ctx_size,
-        "ctx_pct": ctx_pct,
         "ts_context": _int(now.get("context")) if now else None,
         "ctx_growth_per_turn": _num(now.get("growth_per_turn")) if now else None,
         "clear_breakeven_turns": None if be is None or be == float("inf") else be,
-        "cc_cost_usd": _num(_get(p, "cost", "total_cost_usd")),
-        "duration_ms": _int(_get(p, "cost", "total_duration_ms")),
-        "api_duration_ms": _int(_get(p, "cost", "total_api_duration_ms")),
-        "lines_added": _int(_get(p, "cost", "total_lines_added")),
-        "lines_removed": _int(_get(p, "cost", "total_lines_removed")),
-        "five_hour_pct": _num(_get(p, "rate_limits", "five_hour", "used_percentage")),
-        "five_hour_resets_at": _int(_get(p, "rate_limits", "five_hour", "resets_at")),
-        "seven_day_pct": _num(_get(p, "rate_limits", "seven_day", "used_percentage")),
-        "seven_day_resets_at": _int(_get(p, "rate_limits", "seven_day", "resets_at")),
         "ts_version": os.environ.get("TS_VERSION") or None,
-        "session_name": _str(p.get("session_name")),
-        "prompt_id": _str(p.get("prompt_id")),
-        "workspace_current_dir": _str(_get(p, "workspace", "current_dir")),
-        "payload_cwd": _str(p.get("cwd")),
-        "added_dirs": json.dumps(added, ensure_ascii=False) if isinstance(added, list) else None,
-        "thinking_enabled": _bool(_get(p, "thinking", "enabled")),
-        "fast_mode": _bool(p.get("fast_mode")),
-        "output_style": _str(_get(p, "output_style", "name")),
-        "ctx_remaining_pct": _num(_get(cw, "remaining_percentage")),
-        "ctx_input_tokens": ctx_in,
-        "ctx_output_tokens": ctx_out,
-        "last_input_tokens": _int(_get(cu, "input_tokens")),
-        "last_output_tokens": _int(_get(cu, "output_tokens")),
-        "last_cache_creation_tokens": _int(_get(cu, "cache_creation_input_tokens")),
-        "last_cache_read_tokens": _int(_get(cu, "cache_read_input_tokens")),
-        "exceeds_200k_tokens": _bool(p.get("exceeds_200k_tokens")),
         "rate_limits_observed_at": None,      # observed_at(), against the previous row
         "source": source,
-        "unknown_keys": json.dumps(unknown) if unknown else None,
-        "raw_payload": json.dumps(p, ensure_ascii=False, sort_keys=True) if unknown else None,
-    }
+    })
+    unknown = sorted(set(drift) | {k for k in payload_leaves(p) if not _known(k)})
+    if unknown:
+        row["unknown_keys"] = json.dumps(unknown)
+        row["raw_payload"] = json.dumps(p, ensure_ascii=False, sort_keys=True)
+    return row
 
 
 def observed_at(row: dict, prev):
