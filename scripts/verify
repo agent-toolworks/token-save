@@ -3308,7 +3308,7 @@ slline_ok() {
 slsay "$(slpay 1.2345 5000)"
 line=$(cat "$TMP/st.out")
 missing=""
-for want in "Opus 5.5 (high)" "ctx 42k/200k 21%" "/t" "\$1.23" "5h 23% used(2h1" \
+for want in "Opus 5.5 (high)" "ctx 21% free 160.0k" "/t" "\$1.23" "5h 23% used(2h1" \
             "7d 9% used(3d11h)" "/${TMP##*/}"; do
   [[ $line == *"$want"* ]] || missing+=" [$want]"
 done
@@ -3465,6 +3465,8 @@ if not os.access(w, os.X_OK):
     bad.append("the wrapper is missing or not executable")
 if not os.path.isfile(os.path.join(cfg, "token-save", "statusline.previous.json")):
     bad.append("the previous statusLine was not kept")
+if (s.get("statusLine") or {}).get("refreshInterval") != 60:
+    bad.append("refreshInterval is not 60, so an idle line never updates")
 print("|".join(bad))
 PY
 )
@@ -3539,10 +3541,183 @@ fi
 python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute("create table snapshots (id integer primary key, recorded_at text, session_id text)"); d.execute("insert into snapshots (recorded_at, session_id) values (\"2026-01-01T00:00:00Z\", \"old\")"); d.commit()' "$TMP/older.db"
 slsay "$(slpay 2 1)" TS_HISTORY_DB="$TMP/older.db"
 result=$(python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute("pragma user_version").fetchone()[0], d.execute("select count(*), count(cc_cost_usd) from snapshots").fetchone())' "$TMP/older.db")
-if slline_ok && [[ $result == "1 (2, 1)" ]]; then
+if slline_ok && [[ $result == "2 (2, 1)" ]]; then
   ok "history: an older table gains the new columns and keeps its rows"
 else
   bad "history: did not bring an older table up to date" "got [$result]"
+fi
+
+# An install from before refreshInterval existed gets it added, and nothing
+# else: the previous statusLine kept at install time is still the person's.
+UCFG="$TMP/sl-upgrade"; mkdir -p "$UCFG/token-save"
+cp "$ROOT/scripts/statusline.sh" "$UCFG/token-save/statusline.sh"
+printf '{"statusLine": {"type": "command", "command": "~/.claude/statusline.sh"}, "source": null}\n' \
+  > "$UCFG/token-save/statusline.previous.json"
+cp "$UCFG/token-save/statusline.previous.json" "$UCFG/prev.orig"
+printf '{\n  "statusLine": {\n    "type": "command",\n    "command": "%s",\n    "padding": 0\n  }\n}\n' \
+  "$UCFG/token-save/statusline.sh" > "$UCFG/settings.json"
+CLAUDE_CONFIG_DIR="$UCFG" "$TS" fixes apply statusline --yes >"$TMP/sl-up.out" 2>&1
+if grep -q '"refreshInterval": 60' "$UCFG/settings.json" \
+   && cmp -s "$UCFG/prev.orig" "$UCFG/token-save/statusline.previous.json" \
+   && [[ $(diff <(printf '{\n  "statusLine": {\n    "type": "command",\n    "command": "%s",\n    "padding": 0\n  }\n}\n' "$UCFG/token-save/statusline.sh") "$UCFG/settings.json" | grep -c '^[<>]') -le 3 ]]; then
+  ok "fix statusline: an older install gains refreshInterval, and keeps the saved original"
+else
+  bad "fix statusline: upgrading an older install went wrong" "$(cat "$TMP/sl-up.out"; cat "$UCFG/settings.json")"
+fi
+
+# ---- the review on #42: segments, columns, quota freshness, import ----------
+# A payload with every field, and a transcript whose newest cache write was to
+# the 1h bucket. $1 session, $2 5h pct, $3 7d pct, $4 extra JSON members.
+V2="$TMP/v2"; mkdir -p "$V2"
+v2tx() { # transcript: $1 = 1h | 5m, $2 = seconds since the last write
+  local f="$V2/tx-$1.jsonl" h=0 m=0
+  [[ $1 == 1h ]] && h=3000 || m=3000
+  printf '%s\n' \
+    '{"type":"user","message":{"role":"user","content":"hi"},"sessionId":"s","timestamp":"2026-10-16T10:00:00Z"}' \
+    "{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"role\":\"assistant\",\"model\":\"claude-opus-5-5\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":10,\"cache_read_input_tokens\":20000,\"cache_creation_input_tokens\":3000,\"cache_creation\":{\"ephemeral_5m_input_tokens\":$m,\"ephemeral_1h_input_tokens\":$h}}},\"sessionId\":\"s\",\"timestamp\":\"2026-10-16T10:00:01Z\"}" \
+    '{"type":"assistant","message":{"id":"m2","role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":5,"output_tokens":10,"cache_read_input_tokens":23000,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}},"sessionId":"s","timestamp":"2026-10-16T10:00:02Z"}' \
+    > "$f"
+  python3 -c 'import os,sys,time; t=time.time()-int(sys.argv[2]); os.utime(sys.argv[1],(t,t))' "$f" "$2"
+  printf '%s' "$f"
+}
+v2pay() {
+  printf '{"session_id":"%s","transcript_path":"%s","session_name":"demo","prompt_id":"p-1",
+  "cwd":"%s/sub","version":"9.9.9","model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},
+  "effort":{"level":"high"},"thinking":{"enabled":true},"fast_mode":false,
+  "output_style":{"name":"default"},"exceeds_200k_tokens":false,
+  "workspace":{"current_dir":"%s","project_dir":"%s","added_dirs":["/x"]},
+  "cost":{"total_cost_usd":1.5,"total_duration_ms":1000},
+  "context_window":{"total_input_tokens":86400,"total_output_tokens":2000,"context_window_size":200000,
+    "used_percentage":43,"remaining_percentage":57,
+    "current_usage":{"input_tokens":4200,"output_tokens":100,"cache_creation_input_tokens":3000,
+                     "cache_read_input_tokens":80000}},
+  "rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},
+                 "seven_day":{"used_percentage":%s,"resets_at":%s}}%s}' \
+    "$1" "${V2TX:-}" "$TMP" "$TMP" "$TMP" "$2" $((slnow + 3600)) "$3" $((slnow + 90000)) "${4:-}"
+}
+v2db() { # db sql -> rows, | between columns
+  python3 -c 'import sqlite3,sys; [print("|".join("" if v is None else str(v) for v in r)) for r in sqlite3.connect(sys.argv[1]).execute(sys.argv[2])]' "$1" "$2"
+}
+
+V2TX=$(v2tx 1h 600)
+slsay "$(v2pay 1a2b3c4d-aaaa 20 100)" TS_HISTORY_DB="$V2/a.db"
+line=$(cat "$TMP/st.out"); missing=""
+for want in "| 1a2b3c4d |" "Opus 5.5 (high) ✻" "ctx 43% free 113.6k" "cache 91%" "msgs 4.2k" \
+            "warm 4" "7d FULL(" "5h 20% used("; do
+  [[ $line == *"$want"* ]] || missing+=" [$want]"
+done
+if [[ -z $missing ]] && slline_ok; then
+  ok "ts statusline: session id, thinking, free context, cache hit, msgs, warmth and FULL"
+else
+  bad "ts statusline: a segment from the review is missing:$missing" "got [$line]"
+fi
+V2TX=$(v2tx 5m 400)
+slsay "$(v2pay 1a2b3c4d-aaaa 20 100)" TS_HISTORY_DB="$V2/w5.db"
+c5=$(cat "$TMP/st.out")
+V2TX=$(v2tx 1h 5)
+slsay "$(v2pay 1a2b3c4d-aaaa 20 100)" TS_HISTORY_DB="$V2/w0.db"
+c0=$(cat "$TMP/st.out")
+if [[ $c5 == *COLD* && $c0 != *warm* && $c0 != *COLD* ]]; then
+  ok "warmth: a 5m write idle past its TTL is COLD, and a session mid-turn shows none"
+else
+  bad "warmth: TTL or idle read wrong" "5m/400s [$c5]  1h/5s [$c0]"
+fi
+
+# Every payload field lands in its own column; a field with no column is
+# listed and only then is the raw payload kept.
+result=$(v2db "$V2/a.db" "select session_name, prompt_id, workspace_current_dir = '$TMP', payload_cwd = '$TMP/sub', added_dirs, thinking_enabled, fast_mode, output_style, ctx_remaining_pct, ctx_input_tokens, ctx_output_tokens, last_input_tokens, last_output_tokens, last_cache_creation_tokens, last_cache_read_tokens, exceeds_200k_tokens, source, unknown_keys, raw_payload from snapshots")
+want='demo|p-1|1|1|["/x"]|1|0|default|57.0|86400|2000|4200|100|3000|80000|0|statusline||'
+if [[ $result == "$want" ]]; then
+  ok "history: every payload field has its own column, cwd and workspace dir kept apart"
+else
+  bad "history: payload fields not recorded as expected" "got  [$result]
+        want [$want]"
+fi
+slsay "$(v2pay 1a2b3c4d-aaaa 20 100 ',"brand_new":{"x":1}')" TS_HISTORY_DB="$V2/a.db"
+result=$(v2db "$V2/a.db" "select unknown_keys, raw_payload like '%brand_new%' from snapshots order by id desc limit 1")
+if [[ $result == '["brand_new.x"]|1' ]]; then
+  ok "history: a field with no column is listed in unknown_keys, with the raw payload"
+else
+  bad "history: the drift canary did not fire" "got [$result]"
+fi
+
+# Quota freshness. A session's first reading has no observation time; a
+# change is an observation; an unchanged reading keeps the time it had.
+QDB="$V2/q.db"
+slsay "$(v2pay aaaaaaaa-1 20 50)" TS_HISTORY_DB="$QDB"
+slsay "$(v2pay aaaaaaaa-1 22 50)" TS_HISTORY_DB="$QDB"
+slsay "$(v2pay aaaaaaaa-1 22 50 ',"prompt_id":"p-2"')" TS_HISTORY_DB="$QDB"
+result=$(v2db "$QDB" "select rate_limits_observed_at is null, rate_limits_observed_at = recorded_at from snapshots where session_id like 'aaaa%' order by id")
+first_obs=$(v2db "$QDB" "select rate_limits_observed_at from snapshots where session_id like 'aaaa%' order by id limit 1 offset 1")
+last_obs=$(v2db "$QDB" "select rate_limits_observed_at from snapshots where session_id like 'aaaa%' order by id desc limit 1")
+if [[ $result == $'1|\n0|1\n0|'* && -n $first_obs && $first_obs == "$last_obs" ]]; then
+  ok "history: rate_limits_observed_at is NULL at first, set on a change, carried while unchanged"
+else
+  bad "history: rate_limits_observed_at is wrong" "got [$result] first [$first_obs] last [$last_obs]"
+fi
+# Session B, idle on an older reading, shows A's (marked ~) and records its own.
+slsay "$(v2pay bbbbbbbb-1 5 40)" TS_HISTORY_DB="$QDB"
+bl=$(cat "$TMP/st.out")
+brow=$(v2db "$QDB" "select five_hour_pct, seven_day_pct from snapshots where session_id like 'bbbb%'")
+lim=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["five_hour"]["used_percentage"], d["five_hour"]["session_id"])' "$V2/limits.json" 2>&1)
+if [[ $bl == *"5h ~22% used("* && $bl == *"7d ~50% used("* && $brow == "5.0|40.0" && $lim == "22 aaaaaaaa-1" ]]; then
+  ok "quota: an idle session shows the fresher reading, marked ~, and records only its own"
+else
+  bad "quota: the cross-session merge is wrong" "line [$bl] row [$brow] limits [$lim]"
+fi
+# The 7d counter reset in place: a drop with the same resets_at, observed
+# later, is believed rather than held at the old maximum.
+sleep 1
+slsay "$(v2pay aaaaaaaa-1 23 1)" TS_HISTORY_DB="$QDB"
+lim=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["seven_day"]["used_percentage"])' "$V2/limits.json" 2>&1)
+slsay "$(v2pay bbbbbbbb-1 5 40)" TS_HISTORY_DB="$QDB"
+if [[ $lim == 1* && $(cat "$TMP/st.out") == *"7d ~1% used("* ]]; then
+  ok "quota: a same-window drop is believed, not held at the old maximum"
+else
+  bad "quota: a reset in place was not believed" "limits 7d [$lim] line [$(cat "$TMP/st.out")]"
+fi
+out=$(env TS_HISTORY_DB="$QDB" "$TS" limits --json 2>&1)
+if [[ $out == *'"tool_version"'* && $out == *'"used_percentage": 23'* && $out == *'"observed_at"'* ]]; then
+  ok "ts limits --json: the freshest reading per window, with when it was observed"
+else
+  bad "ts limits --json did not report the freshest reading" "$out"
+fi
+
+# The ts now reading is cached on the transcript's size and mtime: a render of
+# an unchanged transcript does not read it again.
+V2TX=$(v2tx 1h 300)
+slsay "$(v2pay cccccccc-1 20 50)" TS_HISTORY_DB="$V2/c.db"
+before=$(cat "$TMP/st.out")
+chmod 000 "$V2TX"
+slsay "$(v2pay cccccccc-1 20 50)" TS_HISTORY_DB="$V2/c.db"
+after=$(cat "$TMP/st.out")
+chmod 644 "$V2TX"
+if [[ $before == *"+0/t"* && $after == *"+0/t"* && $after == *"warm "* ]] && slline_ok; then
+  ok "ts statusline: an unchanged transcript is answered from the cache"
+else
+  bad "ts statusline: the cache did not answer for an unchanged transcript" \
+      "before [$before] after [$after]"
+fi
+
+# Import: any offset becomes UTC, rows go through the dedupe, bad lines are
+# reported and skipped, and a second run writes nothing.
+IDB="$V2/import.db"
+cat > "$V2/old.jsonl" <<'JSONL'
+{"recorded_at":"2026-08-14T09:12:03+03:00","payload":{"session_id":"old-1","cost":{"total_cost_usd":0.5},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1755000000}}}}
+{"recorded_at":"2026-08-14T09:13:03+03:00","payload":{"session_id":"old-1","cost":{"total_cost_usd":0.5},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1755000000}}}}
+{"recorded_at":"2026-08-14T06:14:03Z","payload":{"session_id":"old-1","cost":{"total_cost_usd":0.9},"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1755000000}}}}
+{"recorded_at":"2026-08-14T09:15:03","payload":{"session_id":"old-1"}}
+not json
+JSONL
+env TS_HISTORY_DB="$IDB" "$TS" history import "$V2/old.jsonl" >"$TMP/imp1.out" 2>&1; rc1=$?
+env TS_HISTORY_DB="$IDB" "$TS" history import "$V2/old.jsonl" >"$TMP/imp2.out" 2>&1
+rows=$(v2db "$IDB" "select recorded_at, cc_cost_usd, source, rate_limits_observed_at is not null, git_branch is null from snapshots order by recorded_at")
+want=$'2026-08-14T06:12:03Z|0.5|import|0|1\n2026-08-14T06:14:03Z|0.9|import|1|1'
+if [[ $rc1 == 0 && $rows == "$want" ]] && grep -q "no UTC offset" "$TMP/imp1.out" \
+   && grep -q "not JSON" "$TMP/imp1.out" && grep -Eq "rows written +0" "$TMP/imp2.out"; then
+  ok "ts history import: UTC from any offset, deduped, bad lines refused, re-run writes nothing"
+else
+  bad "ts history import went wrong" "rows [$rows] $(grep -E 'written|refused|line' "$TMP/imp1.out" "$TMP/imp2.out")"
 fi
 
 # ---------------------------------------------------------------------------

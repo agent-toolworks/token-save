@@ -491,6 +491,11 @@ _PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 STATUSLINE_SRC = os.path.join(_PLUGIN_ROOT, "scripts", "statusline.sh")
 
+# Without a refresh interval the line runs only on events, so an idle
+# session's cache warmth and quota never move. A setting someone has already
+# given it is theirs, and is left as it is.
+SL_REFRESH_S = 60
+
 
 def _sl_dir() -> str:
     return os.path.join(CLAUDE_HOME, "token-save")
@@ -532,7 +537,7 @@ def _sl_fresh() -> bool:
 
 def _sl_value_src(indent, unit: str, nl: str) -> str:
     pairs = [("type", '"command"'), ("command", json.dumps(_sl_command())),
-             ("padding", "0")]
+             ("padding", "0"), ("refreshInterval", str(SL_REFRESH_S))]
     if indent is None:
         return "{%s}" % ", ".join('"%s": %s' % kv for kv in pairs)
     inner = indent + unit
@@ -574,8 +579,11 @@ def statusline_show():
         return info
     cur = data.get("statusLine")
     wired, fresh = _sl_is_ours(cur), _sl_fresh()
-    info["applied"] = wired and fresh
+    refresh = wired and "refreshInterval" in cur
+    info["applied"] = wired and fresh and refresh
     lines = []
+    if wired and not refresh:
+        lines.append("  statusLine.refreshInterval: (unset) -> %d" % SL_REFRESH_S)
     if not fresh:
         lines.append("  %s %s" % ("update" if os.path.isfile(_sl_wrapper())
                                   else "copy  ", _sl_wrapper()))
@@ -606,7 +614,8 @@ def statusline_apply():
         return False, "this copy of token-save has no %s" % STATUSLINE_SRC
     cur = data.get("statusLine")
     wired, fresh = _sl_is_ours(cur), _sl_fresh()
-    if wired and fresh:
+    refresh = wired and "refreshInterval" in cur
+    if wired and fresh and refresh:
         return False, "already applied"
 
     unit = _indent_unit(raw) if raw.strip() else "  "
@@ -634,10 +643,13 @@ def statusline_apply():
             os.replace(tmp, wrapper)
     except OSError as exc:
         return False, _write_error(wrapper, exc)
-    if wired:
+    if wired and refresh:
         return True, "updated %s" % wrapper
 
-    if not raw.strip():
+    if wired:
+        # Installed before refreshInterval was: add it, touch nothing else.
+        new = _insert_member(raw, rec[2], "refreshInterval", str(SL_REFRESH_S), nl)
+    elif not raw.strip():
         new = "{%s%s\"statusLine\": %s%s}%s" % (
             nl, unit, _sl_value_src(unit, unit, nl), nl, nl)
     elif rec is None:

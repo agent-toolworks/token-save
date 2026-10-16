@@ -49,6 +49,8 @@ Every recommendation `ts advise` makes is ranked by this, not by raw size.
 | ...as a whole statusline, recording a history | `ts statusline` |
 | Install that statusline (shows the diff first) | `ts fixes show statusline`, then `ts fixes apply statusline --yes` |
 | The history's schema, for a tool that reads it | `ts statusline --schema` |
+| The freshest 5h/7d quota across sessions | `ts limits` (`--json` for tools) |
+| Bring in a history kept by another recorder | `ts history import FILE --dry-run`, then without `--dry-run` |
 | Where did my tokens go? | `ts audit` |
 | ...for one project only | `ts audit --project '*myrepo*'` |
 | ...the heaviest sessions | `ts audit --sessions` |
