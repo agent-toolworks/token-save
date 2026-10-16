@@ -20,7 +20,7 @@ every step that could wait -- stdin, git, the transcript read and the database
 printed and flushed before the row is written, so a database problem can cost
 a row and never the line.
 
-Usage: cmd_statusline.py [--explain]
+Usage: cmd_statusline.py [--explain | --schema]
 """
 from __future__ import annotations
 
@@ -346,6 +346,10 @@ def main(argv=None) -> int:
     # A statusline is not a tty, and Claude Code renders its ANSI colour; the
     # report module's "only on a terminal" rule is for piping to a file.
     R._USE_COLOR = not os.environ.get("NO_COLOR")
+    if argv[:1] == ["--schema"]:
+        # For tools that read the history: no payload, nothing recorded.
+        print(json.dumps(history.schema(), indent=2))
+        return 0
     p = read_payload()
     if argv[:1] == ["--explain"]:
         return explain(p)

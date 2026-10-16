@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # The whole Claude Code statusline, and a local history of what it showed (#41).
-# Copy this file to ~/.claude/ once and point the statusLine setting at it:
+# Installed by `ts fixes apply statusline`, which copies this file to
+# ~/.claude/token-save/statusline.sh and points the statusLine setting at it:
 #
 #     "statusLine": { "type": "command",
-#                     "command": "~/.claude/statusline.sh" }
+#                     "command": "~/.claude/token-save/statusline.sh" }
 #
 # It prints, for example:
 #
@@ -20,7 +21,7 @@
 # setup problem shows as an empty line. When it does, run
 #
 #     echo '{"transcript_path":"/path/to/session.jsonl"}' \
-#       | ~/.claude/statusline.sh --explain
+#       | ~/.claude/token-save/statusline.sh --explain
 #
 # which says what it found, what it would record and where, and writes nothing.
 #

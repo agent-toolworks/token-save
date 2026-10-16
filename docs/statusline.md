@@ -39,33 +39,43 @@ other dependency.
 /plugin install token-save
 ```
 
-**2. Copy the wrapper out of the plugin, once:**
+**2. Find the installed copy.** A plugin install lives in a versioned cache
+directory, so this picks the newest:
 
 ```sh
-cp "$(ls -dt ~/.claude/plugins/cache/*/token-save/*/scripts/statusline.sh | head -1)" ~/.claude/statusline.sh
-chmod +x ~/.claude/statusline.sh
+TS_ROOT=$(ls -d ~/.claude/plugins/cache/*/token-save/*/ | sort -V | tail -1)
 ```
 
-The copy does not go stale when the plugin updates. All it does is find the
+**3. See what it would change, then install it:**
+
+```sh
+"$TS_ROOT/scripts/ts" fixes show statusline           # the diff; changes nothing
+"$TS_ROOT/scripts/ts" fixes apply statusline --yes    # install
+```
+
+This copies the wrapper to `~/.claude/token-save/statusline.sh` and sets
+`statusLine` in `~/.claude/settings.json` to run it. Nothing else in the file
+changes, and a timestamped backup is written next to it. If you already had a
+statusline, its setting is kept in `~/.claude/token-save/statusline.previous.json`
+and
+
+```sh
+"$TS_ROOT/scripts/ts" fixes revert statusline
+```
+
+puts it back exactly as it was, and removes the wrapper. The history is kept.
+Revert does nothing if you have pointed `statusLine` somewhere else since.
+
+The wrapper does not go stale when the plugin updates. All it does is find the
 newest installed `ts` and pass it the session JSON, so the line and the history
 always come from the version you have installed. Plugin cache directories are
 versioned and old ones are left behind after an update, which is why
-`settings.json` should point at the copy and not into the cache.
+`settings.json` points at the copy and not into the cache. Running `apply`
+again after an update refreshes the copy if the wrapper itself changed, and
+`ts fixes list` shows whether it is current.
 
-If you already have a `~/.claude/statusline.sh`, back it up first or choose
-another name for the copy.
-
-**3. Point Claude Code at it** in `~/.claude/settings.json`:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "~/.claude/statusline.sh",
-    "padding": 0
-  }
-}
-```
+You can also ask Claude Code to do it ("install the token-save statusline").
+The skill shows you the diff and asks before applying it.
 
 **4. Check it.** The line appears from the next render, with no restart
 needed. To see what it read and what it would record, without writing
@@ -73,7 +83,7 @@ anything:
 
 ```sh
 echo '{"session_id":"x","transcript_path":"/path/to/session.jsonl","model":{"display_name":"Opus 5.5"}}' \
-  | ~/.claude/statusline.sh --explain
+  | ~/.claude/token-save/statusline.sh --explain
 ```
 
 It names the `ts` it found (or says none was found), prints the line, shows the
@@ -96,49 +106,44 @@ if you set it). It is a SQLite file, created on the first render, readable only
 by you (`0600`, in a `0700` directory).
 
 **What a row holds:** one table, `snapshots`, with one row each time something
-on the line changes for a session.
+on the line changes for a session: where (directory, branch), which model and
+effort, context, Claude Code's cost figure, durations, lines changed, and the
+5h and 7d quota with their reset times.
 
-| Column | |
-|---|---|
-| `recorded_at` | UTC, ISO 8601 |
-| `session_id`, `transcript_path` | which session |
-| `claude_version` | Claude Code version |
-| `cwd`, `project_dir`, `git_branch` | where |
-| `model_id`, `model_name`, `effort` | model and reasoning effort |
-| `ctx_tokens`, `ctx_size`, `ctx_pct` | context, as Claude Code reports it |
-| `ts_context`, `ctx_growth_per_turn`, `clear_breakeven_turns` | the `ts now` reading (`NULL` break-even: clearing would not pay) |
-| `cc_cost_usd` | session cost so far: Claude Code's estimate, stored as it was reported |
-| `duration_ms`, `api_duration_ms` | wall time and API time so far |
-| `lines_added`, `lines_removed` | lines changed in the session so far |
-| `five_hour_pct`, `five_hour_resets_at` | 5-hour quota used, and its reset (epoch seconds) |
-| `seven_day_pct`, `seven_day_resets_at` | the same for 7 days |
-| `ts_version` | the token-save version that wrote the row |
+**The schema is a contract.** [history-schema.md](history-schema.md) is
+written for tools that read the file, such as a dashboard of usage over time.
+It covers every column, how to open the file safely while sessions write to
+it, and what can change between versions (columns are only ever added).
+`ts statusline --schema` prints the same as JSON.
 
 The per-session values (cost, durations, lines) are **running totals**, so a
 session's figure is its last row, not the sum of its rows. Wall time moves on
 every render without anything else happening, so it does not count as a change
 on its own. The `duration_ms` you see is from the first render of each state.
 
-**What it does not hold:** message content of any kind. Nothing reads the
-database except `ts statusline --explain`, nothing sends it anywhere, and
-`ts share` does not include it.
+**What it does not hold:** message content of any kind. Within token-save,
+nothing reads the database except `ts statusline --explain`, nothing sends it
+anywhere, and `ts share` does not include it.
 
 ### Querying it
 
 ```sh
-sqlite3 -header -column ~/.claude/token-save/history.db "
-  SELECT date(recorded_at) AS day,
-         count(DISTINCT session_id) AS sessions,
-         printf('%.2f', sum(cost)) AS cc_cost_usd,
+sqlite3 -header -column "file:$HOME/.claude/token-save/history.db?mode=ro" "
+  WITH sessions AS (
+    SELECT session_id, min(recorded_at) AS started, max(id) AS last_id,
+           max(five_hour_pct) AS peak_5h
+    FROM snapshots GROUP BY session_id)
+  SELECT date(started) AS day,
+         count(*) AS sessions,
+         printf('%.2f', sum(s.cc_cost_usd)) AS cc_cost_usd,
          max(peak_5h) AS peak_5h_pct
-  FROM (SELECT session_id, min(recorded_at) AS recorded_at,
-               max(cc_cost_usd) AS cost, max(five_hour_pct) AS peak_5h
-        FROM snapshots GROUP BY session_id)
+  FROM sessions JOIN snapshots s ON s.id = sessions.last_id
   GROUP BY day ORDER BY day DESC LIMIT 14"
 ```
 
-This puts each session on the day it started, takes its largest cost figure
-(the running total at its last render), and shows each day's peak 5-hour quota.
+This puts each session on the day it started, takes the cost from its last
+row (the running total at its last render), and shows each day's peak 5-hour
+quota. [history-schema.md](history-schema.md#queries) has more.
 
 ### Turning it off, or moving it
 

@@ -95,25 +95,61 @@ def _connect(path: str) -> sqlite3.Connection:
 
 
 def _ensure_schema(db: sqlite3.Connection) -> bool:
-    """Create the table on first use. False if the file belongs to a newer
-    schema, which this version must not write to."""
+    """Create the table on first use, or bring an older one up to date. False
+    if the file belongs to a newer schema, which this version must not write
+    to."""
     version = db.execute("PRAGMA user_version").fetchone()[0]
     if version > SCHEMA_VERSION:
         return False
     if version == SCHEMA_VERSION:
         return True
     # WAL lets one session read while another writes. It is a property of the
-    # file, so it is set once, at creation.
+    # file, and cannot be changed inside a transaction, so it goes first.
     db.execute("PRAGMA journal_mode=WAL")
-    cols = ",\n  ".join("%s %s" % (n, t) for n, t, _ in COLUMNS)
-    db.execute("CREATE TABLE IF NOT EXISTS snapshots (\n"
-               "  id INTEGER PRIMARY KEY,\n  %s\n)" % cols)
-    db.execute("CREATE INDEX IF NOT EXISTS snapshots_session "
-               "ON snapshots (session_id, id)")
-    db.execute("CREATE INDEX IF NOT EXISTS snapshots_time "
-               "ON snapshots (recorded_at)")
-    db.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
+    # Two sessions can both find an old file on their first render. The
+    # second waits here, then finds the work done.
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if version >= SCHEMA_VERSION:
+            db.execute("COMMIT")
+            return version == SCHEMA_VERSION
+        cols = ",\n  ".join("%s %s" % (n, t) for n, t, _ in COLUMNS)
+        db.execute("CREATE TABLE IF NOT EXISTS snapshots (\n"
+                   "  id INTEGER PRIMARY KEY,\n  %s\n)" % cols)
+        # A table from an older version lacks the columns added since. Columns
+        # are only ever added (the promise in docs/history-schema.md), so
+        # adding the missing ones is the whole migration, and rows written
+        # before have NULL in them -- which a reader already has to handle.
+        have = {r[1] for r in db.execute("PRAGMA table_info(snapshots)")}
+        for n, t, _ in COLUMNS:
+            if n not in have:
+                db.execute("ALTER TABLE snapshots ADD COLUMN %s %s" % (n, t))
+        db.execute("CREATE INDEX IF NOT EXISTS snapshots_session "
+                   "ON snapshots (session_id, id)")
+        db.execute("CREATE INDEX IF NOT EXISTS snapshots_time "
+                   "ON snapshots (recorded_at)")
+        db.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
     return True
+
+
+def schema() -> dict:
+    """The table as a reader sees it: what `ts statusline --schema` prints for
+    tools that read the history, and what docs/history-schema.md documents.
+    Built from COLUMNS, so it cannot describe a table other than the one
+    record() writes."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "database": db_path(),
+        "table": "snapshots",
+        "columns": [{"name": "id", "type": "INTEGER",
+                     "description": "row id, increasing in the order rows were written"}]
+                   + [{"name": n, "type": t, "description": d} for n, t, d in COLUMNS],
+    }
 
 
 def record(row: dict, path: str = None) -> str:

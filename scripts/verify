@@ -257,7 +257,7 @@ grep -qi traceback "$TMP/empty.err" \
   && bad "empty transcript root produced a traceback" \
   || ok "empty transcript root reports cleanly"
 
-for fid in terse-output tool-search; do
+for fid in terse-output tool-search statusline; do
   "$TS" fixes apply "$fid" --yes >/dev/null 2>&1
   a=$("$TS" fixes show "$fid" 2>/dev/null | grep -c "applied" || true)
   "$TS" fixes apply "$fid" --yes >"$TMP/second.$fid" 2>&1
@@ -309,7 +309,7 @@ for variant in trailing no-trailing; do
   printf '{\n  "model": "opus"\n}\n' > "$RCFG/settings.json"
   cp "$RCFG/CLAUDE.md" "$RCFG/md.orig"
   cp "$RCFG/settings.json" "$RCFG/js.orig"
-  for fid in terse-output tool-search; do
+  for fid in terse-output tool-search statusline; do
     CLAUDE_CONFIG_DIR="$RCFG" "$TS" fixes apply "$fid" --yes >/dev/null 2>&1
     CLAUDE_CONFIG_DIR="$RCFG" "$TS" fixes revert "$fid" >/dev/null 2>&1
   done
@@ -3435,6 +3435,114 @@ if grep -q '^line: ' "$TMP/explain.out" && grep -q 'cc_cost_usd' "$TMP/explain.o
   ok "statusline.sh --explain shows the line and the row, and writes nothing"
 else
   bad "statusline.sh --explain did not explain, or recorded" "$(head -3 "$TMP/explain.out")"
+fi
+
+# Installing it: `ts fixes apply statusline` is how other people get the line,
+# and most of them already have one. Theirs must survive the install byte for
+# byte, and nothing else in settings.json may move.
+ICFG="$TMP/sl-install"; mkdir -p "$ICFG"
+cat > "$ICFG/settings.json" <<'JSON'
+{
+    "model": "opus",
+    "statusLine": { "type": "command", "command": "~/.claude/statusline.sh" },
+    "note": "policy — written in sentences"
+}
+JSON
+cp "$ICFG/settings.json" "$ICFG/orig"
+CLAUDE_CONFIG_DIR="$ICFG" "$TS" fixes apply statusline --yes >"$TMP/sl-apply.out" 2>&1
+result=$(CLAUDE_CONFIG_DIR="$ICFG" python3 - "$ICFG" <<'PY'
+import json, os, sys
+cfg = sys.argv[1]
+s = json.load(open(os.path.join(cfg, "settings.json"), encoding="utf-8"))
+bad = []
+cmd = (s.get("statusLine") or {}).get("command", "")
+if os.path.expanduser(cmd) != os.path.join(cfg, "token-save", "statusline.sh"):
+    bad.append("statusLine.command is %r" % cmd)
+if s.get("model") != "opus" or s.get("note") != "policy — written in sentences":
+    bad.append("an unrelated key changed")
+w = os.path.join(cfg, "token-save", "statusline.sh")
+if not os.access(w, os.X_OK):
+    bad.append("the wrapper is missing or not executable")
+if not os.path.isfile(os.path.join(cfg, "token-save", "statusline.previous.json")):
+    bad.append("the previous statusLine was not kept")
+print("|".join(bad))
+PY
+)
+if [[ -z $result ]]; then
+  ok "fix statusline: installs the wrapper and points statusLine at it, other keys untouched"
+else
+  bad "fix statusline: install is wrong" "${result//|/$'\n        '} $(cat "$TMP/sl-apply.out")"
+fi
+out=$(slpay 1 1 | bounded 20 env TS_BIN="$TS" TS_HISTORY_DB="$TMP/installed.db" \
+        bash "$ICFG/token-save/statusline.sh" 2>&1)
+if [[ $out == *"Opus 5.5"* && $(slrows "$TMP/installed.db") == 1 ]]; then
+  ok "fix statusline: the installed wrapper renders the line and records it"
+else
+  bad "fix statusline: the installed wrapper does not work" "got [$out]"
+fi
+CLAUDE_CONFIG_DIR="$ICFG" "$TS" fixes revert statusline >/dev/null 2>&1
+if cmp -s "$ICFG/orig" "$ICFG/settings.json" && [[ ! -e $ICFG/token-save/statusline.sh ]]; then
+  ok "fix statusline: revert puts the previous statusline back byte for byte"
+else
+  bad "fix statusline: revert did not restore the previous statusline" \
+      "$(diff "$ICFG/orig" "$ICFG/settings.json")"
+fi
+# Someone who points statusLine elsewhere after installing has made it theirs.
+CLAUDE_CONFIG_DIR="$ICFG" "$TS" fixes apply statusline --yes >/dev/null 2>&1
+python3 - "$ICFG/settings.json" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p, encoding="utf-8").read()
+i = s.index('"command": "') + len('"command": "'); j = s.index('"', i)
+open(p, "w", encoding="utf-8").write(s[:i] + "/opt/mine.sh" + s[j:])
+PY
+cp "$ICFG/settings.json" "$ICFG/mine"
+CLAUDE_CONFIG_DIR="$ICFG" "$TS" fixes revert statusline >"$TMP/sl-revert.out" 2>&1
+if cmp -s "$ICFG/mine" "$ICFG/settings.json" && grep -q "not applied" "$TMP/sl-revert.out"; then
+  ok "fix statusline: revert leaves a statusLine changed by hand alone"
+else
+  bad "fix statusline: revert overwrote a statusLine it no longer owns" "$(cat "$TMP/sl-revert.out")"
+fi
+
+# The schema is a contract for other tools (docs/history-schema.md). Three
+# copies of it must agree: the table a render creates, `--schema`, and the
+# column table in the doc.
+env TS_HISTORY_DB="$SLDB" "$TS" statusline --schema >"$TMP/schema.json" 2>&1
+# A crash in the check prints nothing on stdout, which would read as a pass.
+result=$(python3 - "$SLDB" "$ROOT/docs/history-schema.md" "$TMP/schema.json" 2>&1 <<'PY' || echo "the check itself failed"
+import json, re, sqlite3, sys
+sch = json.load(open(sys.argv[3]))
+want = [(c["name"], c["type"]) for c in sch["columns"]]
+db = sqlite3.connect(sys.argv[1])
+bad = []
+table = [(r[1], r[2]) for r in db.execute("PRAGMA table_info(snapshots)")]
+if table != want:
+    bad.append("--schema differs from the table: %s" % sorted(set(table) ^ set(want)))
+if db.execute("PRAGMA user_version").fetchone()[0] != sch["schema_version"]:
+    bad.append("user_version differs from --schema")
+if sch["database"] != sys.argv[1]:
+    bad.append("--schema names %r as the database" % sch["database"])
+doc = re.findall(r"^\| `(\w+)` \| (\w+) \|", open(sys.argv[2], encoding="utf-8").read(), re.M)
+if doc != want:
+    bad.append("docs/history-schema.md differs: %s" % sorted(set(doc) ^ set(want))
+               if set(doc) != set(want) else "docs/history-schema.md lists them in another order")
+print("|".join(bad))
+PY
+)
+if [[ -z $result ]]; then
+  ok "history schema: the table, --schema and docs/history-schema.md agree"
+else
+  bad "history schema: its copies disagree" "${result//|/$'\n        '}"
+fi
+
+# Columns are only ever added, so an older table gains the new ones on the
+# next render, and its rows survive.
+python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute("create table snapshots (id integer primary key, recorded_at text, session_id text)"); d.execute("insert into snapshots (recorded_at, session_id) values (\"2026-01-01T00:00:00Z\", \"old\")"); d.commit()' "$TMP/older.db"
+slsay "$(slpay 2 1)" TS_HISTORY_DB="$TMP/older.db"
+result=$(python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute("pragma user_version").fetchone()[0], d.execute("select count(*), count(cc_cost_usd) from snapshots").fetchone())' "$TMP/older.db")
+if slline_ok && [[ $result == "1 (2, 1)" ]]; then
+  ok "history: an older table gains the new columns and keeps its rows"
+else
+  bad "history: did not bring an older table up to date" "got [$result]"
 fi
 
 # ---------------------------------------------------------------------------

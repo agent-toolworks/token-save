@@ -47,6 +47,8 @@ Every recommendation `ts advise` makes is ranked by this, not by raw size.
 | What is this session costing right now? | `ts now` |
 | ...as a statusline fragment | `ts now --statusline` |
 | ...as a whole statusline, recording a history | `ts statusline` |
+| Install that statusline (shows the diff first) | `ts fixes show statusline`, then `ts fixes apply statusline --yes` |
+| The history's schema, for a tool that reads it | `ts statusline --schema` |
 | Where did my tokens go? | `ts audit` |
 | ...for one project only | `ts audit --project '*myrepo*'` |
 | ...the heaviest sessions | `ts audit --sessions` |
@@ -129,11 +131,16 @@ existing one. It degrades to printing nothing, so it cannot break a working
 prompt.
 
 If they want the whole line (directory, branch, model, effort, context, cost, 5h
-and 7d quota) or a record of usage over time, point them at
-`docs/statusline.md`: `scripts/statusline.sh` is the full statusline, and it
-records each change into `~/.claude/token-save/history.db`. The person edits
-their own `settings.json` and copies the file; offer the steps, and do not
-replace an existing statusline without asking.
+and 7d quota) or a record of usage over time, install it with the
+`statusline` fix. It records each change into `~/.claude/token-save/history.db`.
+Run `ts fixes show statusline` first and show them the diff. If it replaces
+a statusline they already have, say so: their setting is kept, and
+`ts fixes revert statusline` puts it back. Apply it with `--yes` only after
+they agree. `docs/statusline.md` has the details.
+
+If they are building something that reads that history (a dashboard, a
+report), point them at `docs/history-schema.md`, the contract for readers, and
+`ts statusline --schema`, which prints it as JSON.
 
 ## Setup
 

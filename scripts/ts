@@ -50,7 +50,9 @@ COMMANDS
                    shape only, no paths, names, commands or contents.
   statusline       The whole statusline, from the session JSON on stdin, and
                    a row in the local history for each change it shows.
-                   --explain says what it read and would record.
+                   --explain says what it read and would record; --schema
+                   prints the history's columns as JSON, for tools that read
+                   it. Install it with: ts fixes apply statusline
   version          Print the version.
 
 COMMON OPTIONS  (audit, advise)

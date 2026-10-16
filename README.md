@@ -108,8 +108,12 @@ otherwise.
 model and effort, context, the `ts now` segment below, session cost, and the 5h
 and 7d quota. It also records each change into a local SQLite history, because
 the quota and Claude Code's cost figure reach nothing else that keeps them
-(#41). [docs/statusline.md](docs/statusline.md) covers installing it, what a
-row holds, querying it, and turning recording off.
+(#41). `ts fixes apply statusline` installs it: it shows the diff first, keeps
+any statusline you already had, and reverts. [docs/statusline.md](docs/statusline.md)
+covers installing it, what a row holds, querying it, and turning recording
+off. [docs/history-schema.md](docs/history-schema.md) is the contract for
+tools that read the history: every column, how to open the file while it is
+being written, and what may change between versions.
 
 **Only the segment**, for a statusline you already have:
 
@@ -286,6 +290,7 @@ so the ranking can never disagree with its own numbers.
 |---|---|
 | `terse-output` | appends a response-style block to `CLAUDE.md` |
 | `tool-search` | sets `ENABLE_TOOL_SEARCH=true` when a custom base URL has disabled tool deferral |
+| `statusline` | installs token-save's statusline, which records the history; any statusline you had is kept and comes back on revert |
 
 Every one shows a diff first (`--dry-run` is the default), writes a timestamped
 backup, is idempotent, and reverts. A fix that cannot meet all four does not
