@@ -75,6 +75,12 @@ mkdir -p "$CLAUDE_CONFIG_DIR"
 # empty directory makes that mistake loud and identical everywhere.
 export TS_TRANSCRIPT_DIR="$TMP/no-transcripts"
 mkdir -p "$TS_TRANSCRIPT_DIR"
+
+# And whatever ts settings the caller exported. A Claude Code shell inherits
+# TS_BIN from settings.json's env block, and an inherited TS_BIN outranks the
+# fake plugin cache the statusline checks build, so they ran the real ts and
+# failed (#45). Checks that want one of these pass it explicitly via env.
+unset TS_BIN TS_HISTORY TS_HISTORY_DB TS_VERSION
 cleanup() { [[ $KEEP == 1 ]] || rm -rf "$TMP"; }
 trap cleanup EXIT
 
