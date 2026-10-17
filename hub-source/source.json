@@ -1,0 +1,17 @@
+{
+  "contract": 1,
+  "name": "token-save",
+  "title": "token-save",
+  "version": "0.25.0",
+  "network": false,
+  "refresh_seconds": 60,
+  "widgets": [
+    {"id": "cost-today", "kind": "stat", "title": "Estimated cost today"},
+    {"id": "five-hour", "kind": "stat", "title": "5-hour quota"},
+    {"id": "seven-day", "kind": "stat", "title": "7-day quota"},
+    {"id": "cost", "kind": "timeseries", "title": "Estimated cost per day, last 30 days"},
+    {"id": "sessions", "kind": "table", "title": "Recent sessions"},
+    {"id": "projects", "kind": "table", "title": "Cost by project, last 30 days"}
+  ],
+  "shows": ["session"]
+}

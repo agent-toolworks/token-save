@@ -2934,12 +2934,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-head_ "6. VERSIONS  (four places that must agree)"
+head_ "6. VERSIONS  (five places that must agree)"
 # ---------------------------------------------------------------------------
-# The CLI, the plugin manifest, this repo's own marketplace entry and the git
-# tag are read by four different consumers and drift silently. A v0.2.0 tag
-# once pointed at a manifest saying 0.1.0; the marketplace entry then sat at
-# 0.1.0 against a 0.3.0 manifest until `claude plugin validate` said so.
+# The CLI, the plugin manifest, this repo's own marketplace entry, the
+# toolworks-hub source manifest and the git tag are read by five different
+# consumers and drift silently. A v0.2.0 tag once pointed at a manifest saying
+# 0.1.0; the marketplace entry then sat at 0.1.0 against a 0.3.0 manifest until
+# `claude plugin validate` said so.
 vres=$(python3 - "$ROOT" <<'VERCHK'
 import json, os, re, subprocess, sys
 root = sys.argv[1]
@@ -2948,6 +2949,9 @@ manifest = json.load(open(os.path.join(root, ".claude-plugin", "plugin.json")))[
 cli = re.search(r'TS_VERSION="([^"]+)"', open(os.path.join(root, "scripts", "ts")).read()).group(1)
 if manifest != cli:
     bad.append("plugin.json %s != scripts/ts %s" % (manifest, cli))
+hub = json.load(open(os.path.join(root, "hub-source", "source.json")))["version"]
+if hub != manifest:
+    bad.append("hub-source/source.json %s != plugin.json %s" % (hub, manifest))
 # This repo is also its own marketplace, for people who add it directly rather
 # than through the org catalogue. That entry drifted once and `claude plugin
 # validate` caught it when this check did not -- so it is checked here too,
@@ -3798,6 +3802,138 @@ if [[ $r == '["pr"]' ]]; then
   ok "history: a scalar where a known object belongs is listed in unknown_keys"
 else
   bad "history: a known object of the wrong type was not reported" "got [$r]"
+fi
+
+# ---------------------------------------------------------------------------
+head_ "11. HUB SOURCE  (what toolworks-hub reads, through hub-source/run)"
+# ---------------------------------------------------------------------------
+# toolworks-hub runs hub-source/run inside the installed plugin. The checks
+# pin what it prints against a history built by the writer itself
+# (history.record), with expected values worked out from the rows below, not
+# recorded from the program's output. When a toolworks-hub checkout sits
+# beside this repo, or HUB_ROOT names one, the hub's own check-source runs too.
+HS="$ROOT/hub-source/run"
+HSD="$TMP/hubsrc"
+mkdir -p "$HSD"
+hsbuild=$(python3 - "$ROOT/scripts/lib" "$HSD" <<'HSBUILD'
+import json, os, sys
+from datetime import datetime, timedelta, timezone
+sys.path.insert(0, sys.argv[1])
+import history
+d = sys.argv[2]
+now = datetime.now(timezone.utc).replace(microsecond=0)
+at = lambda minutes: (now - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+A, B, C = ("aaaaaaaa-1111-4222-8333-444444444444", "bbbbbbbb-1111-4222-8333-444444444444",
+           "cccccccc-1111-4222-8333-444444444444")
+def pay(sid, cost, proj):
+    return {"session_id": sid, "model": {"display_name": "Opus 5.5"}, "effort": {"level": "high"},
+            "workspace": {"current_dir": proj, "project_dir": proj},
+            "cost": {"total_cost_usd": cost, "total_duration_ms": 600000,
+                     "total_lines_added": 10, "total_lines_removed": 2},
+            "context_window": {"used_percentage": 30}}
+# A: two rows, a running total of 1.25. B: 2.00. C: 40 days old, 9.00, outside
+# every 30-day window. "import-1" is not a Claude Code session id.
+rows = [(C, 9.0, "/w/old", 40 * 24 * 60), (A, 0.5, "/w/app", 3), (A, 1.25, "/w/app", 2),
+        (B, 2.0, "/w/lib", 1), ("import-1", 0.1, "/w/imp", 4)]
+for sid, cost, proj, minutes in rows:
+    r = history.record(history.row_from_payload(pay(sid, cost, proj), recorded_at=at(minutes)),
+                       os.path.join(d, "history.db"))
+    if r != "written":
+        print("record: %s" % r)
+ts = now.timestamp()
+json.dump({"version": 1, "updated_at": at(0),
+           "five_hour": {"used_percentage": 23.4, "resets_at": int(ts + 7200), "observed_at": at(1), "session_id": B},
+           "seven_day": {"used_percentage": 9, "resets_at": int(ts - 60), "observed_at": at(1), "session_id": B}},
+          open(os.path.join(d, "limits.json"), "w"))
+HSBUILD
+)
+[[ -z $hsbuild ]] || bad "hub source: the fixture history could not be built" "$hsbuild"
+
+hsrun() { TS_HISTORY_DB="$HSD/history.db" "$@"; }  # "$@" may be a function
+for w in cost-today cost five-hour seven-day sessions projects; do
+  hsrun bounded 20 "$HS" fetch $w > "$HSD/$w.json" 2> "$HSD/$w.err"
+done
+hsrun bounded 20 "$HS" show session aaaaaaaa-1111-4222-8333-444444444444 > "$HSD/show.json" 2> "$HSD/show.err"
+hsrun bounded 20 "$HS" show session dddddddd-1111-4222-8333-444444444444 > "$HSD/show-none.json" 2>&1
+hsres=$(python3 - "$HSD" <<'HSCHK'
+import json, os, sys
+from datetime import datetime, timezone
+d = sys.argv[1]
+def load(n):
+    try:
+        return json.load(open(os.path.join(d, n)))
+    except Exception as e:
+        return {"error": "%s: %s" % (n, e)}
+res = []
+def check(ok, good, bad):
+    res.append(("ok " if ok else "bad ") + (good if ok else bad))
+t = load("cost-today.json")
+check(t.get("data", {}).get("value") == 3.35 and t["data"]["label"].startswith("3 session(s)"),
+      "cost today is each session's latest total, summed: 1.25 + 2.00 + 0.10, not C's 9.00",
+      "cost today: %s" % t)
+s = load("cost.json")
+pts = s.get("data", {}).get("series", [{}])[0].get("points", [])
+today = datetime.now(timezone.utc).date().isoformat()
+check(len(pts) == 30 and pts[-1] == {"t": today + "T00:00:00Z", "v": 3.35} and sum(p["v"] for p in pts) == 3.35,
+      "cost per day: 30 days, every day present, today at 3.35, C outside the window",
+      "cost per day: %s" % pts[-3:])
+f = load("five-hour.json")
+check(f.get("data", {}).get("value") == 23 and f["data"].get("unit") == "%" and "as_of" in f,
+      "the 5-hour quota comes from limits.json, with when it was observed",
+      "five-hour: %s" % f)
+v = load("seven-day.json")
+check(v.get("data", {}).get("value") == "—" and "reset" in v["data"].get("label", ""),
+      "a quota window whose resets_at has passed shows no number",
+      "seven-day: %s" % v)
+rows = load("sessions.json").get("data", {}).get("rows", [])
+check([r["session"]["id"] if isinstance(r["session"], dict) else r["session"] for r in rows[:2]]
+      == ["bbbbbbbb-1111-4222-8333-444444444444", "aaaaaaaa-1111-4222-8333-444444444444"]
+      and rows[1]["cost"] == 1.25 and rows[1]["lines"] == "+10 −2",
+      "recent sessions: newest first, a session's figures from its latest row",
+      "sessions: %s" % rows[:2])
+imp = [r for r in rows if r["session"] == "import-1"]
+check(len(imp) == 1, "a session id that is not Claude Code's stays plain text, not a link",
+      "import-1 row: %s" % [r["session"] for r in rows])
+p = load("projects.json").get("data", {}).get("rows", [])
+check([(r["project"], r["cost"]) for r in p] == [("/w/lib", 2.0), ("/w/app", 1.25), ("/w/imp", 0.1)],
+      "cost by project, last 30 days, most expensive first", "projects: %s" % p)
+w = {x["id"]: x for x in load("show.json").get("widgets", [])}
+items = {i["text"]: i["detail"] for i in w.get("details", {}).get("data", {}).get("items", [])}
+check(w.get("cost", {}).get("data", {}).get("value") == 1.25
+      and len(w.get("cost-over-time", {}).get("data", {}).get("series", [{}])[0].get("points", [])) == 2
+      and items.get("Model") == "Opus 5.5 (high)",
+      "show session: its total, its cost over time, and its model", "show: %s" % w)
+check(load("show-none.json") == {"widgets": []}, "show for a session it never recorded is empty",
+      "show unknown: %s" % load("show-none.json"))
+print("\n".join(res))
+HSCHK
+)
+while IFS= read -r line; do
+  case $line in "ok "*) ok "hub source: ${line#ok }" ;; *) bad "hub source: ${line#bad }" ;; esac
+done <<< "$hsres"
+
+st=$(hsrun bounded 20 "$HS" detect)
+[[ $st == '{"state": "working", "tool_version": "'*'"}' ]] && ok "hub source: detect says working on a readable history" \
+  || bad "hub source: detect on a readable history" "$st"
+st=$(TS_HISTORY=off bounded 20 "$HS" detect)
+[[ $st == *'"state": "off"'* ]] && ok "hub source: TS_HISTORY=off is off, not an error" || bad "hub source: TS_HISTORY=off" "$st"
+st=$(TS_HISTORY_DB="$HSD/none.db" bounded 20 "$HS" detect)
+[[ $st == *'"state": "not_set_up"'* && $st == *"fixes apply statusline"* ]] \
+  && ok "hub source: no history yet is not_set_up, with the command that fixes it" || bad "hub source: missing history" "$st"
+python3 -c 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute("create table snapshots(id integer)"); db.execute("pragma user_version=1"); db.commit()' "$HSD/v1.db"
+st=$(TS_HISTORY_DB="$HSD/v1.db" bounded 20 "$HS" detect)
+[[ $st == *'"state": "incompatible"'* ]] && ok "hub source: a schema-1 history is incompatible" || bad "hub source: schema 1" "$st"
+
+HUBR=${HUB_ROOT:-$ROOT/../toolworks-hub}
+if [[ -x $HUBR/scripts/hub ]]; then
+  if out=$(hsrun bounded 60 "$HUBR/scripts/hub" check-source "$ROOT/hub-source" \
+             --entity session=aaaaaaaa-1111-4222-8333-444444444444 2>&1); then
+    ok "hub source: toolworks-hub's check-source passes, show included"
+  else
+    bad "hub source: toolworks-hub's check-source failed" "$out"
+  fi
+else
+  skip "hub source: toolworks-hub's check-source" "(no checkout at $HUBR; set HUB_ROOT)"
 fi
 
 # ---------------------------------------------------------------------------
