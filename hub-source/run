@@ -3,7 +3,8 @@
 
 The hub finds this folder inside the installed plugin and runs `run detect`,
 `run fetch <widget>` and `run show session <id>`, each printing JSON in the
-shapes its source contract (version 1) defines.
+shapes its source contract (version 2) defines. Version 2 is what lets a
+quota say when it resets (resets_at), which the hub counts down to.
 
 It reads the history the statusline records exactly as docs/history-schema.md
 tells a reader to: found by history.db_path(), the writer's own lookup;
@@ -149,6 +150,8 @@ def quota(window):
     if isinstance(resets, (int, float)):
         label = "used; resets %s" % datetime.fromtimestamp(resets).astimezone().strftime("%a %H:%M")
     result = {"kind": "stat", "data": {"value": round(entry["used_percentage"]), "unit": "%", "label": label}}
+    if isinstance(resets, (int, float)):
+        result["data"]["resets_at"] = utc(datetime.fromtimestamp(resets, timezone.utc))
     if isinstance(entry.get("observed_at"), str):
         result["as_of"] = entry["observed_at"]
     out(result)
