@@ -2,7 +2,7 @@
   "contract": 1,
   "name": "token-save",
   "title": "token-save",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "network": false,
   "refresh_seconds": 60,
   "widgets": [
