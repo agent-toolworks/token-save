@@ -347,6 +347,22 @@ updated and restarted, the older ones can be deleted; nothing in this
 repository reads them except the statusline snippet, which always picks the
 newest.
 
+## In toolworks-hub
+
+[toolworks-hub](https://github.com/agent-toolworks/toolworks-hub) shows this
+plugin's numbers on a local page: today's estimated cost, the 5-hour and 7-day
+quota, cost per day and by project over 30 days, recent sessions, and a
+section on each session's page. It finds `hub-source/` inside the installed
+plugin and runs it; nothing needs configuring.
+
+`hub-source/run` reads the history the way
+[docs/history-schema.md](docs/history-schema.md) tells any reader to:
+read-only, columns by name, totals from a session's latest row. With no
+history it reports *not set up* and names `ts fixes apply statusline`; with
+`TS_HISTORY=off` it reports *off*; and it reports *stale* from the same
+on-disk check `ts doctor` makes. Its version is checked against the others in
+`scripts/verify`, so a release bumps `hub-source/source.json` too.
+
 ## Verifying it
 
 ```sh

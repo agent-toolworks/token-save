@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""token-save's source for toolworks-hub.
+
+The hub finds this folder inside the installed plugin and runs `run detect`,
+`run fetch <widget>` and `run show session <id>`, each printing JSON in the
+shapes its source contract (version 1) defines.
+
+It reads the history the statusline records exactly as docs/history-schema.md
+tells a reader to: found by history.db_path(), the writer's own lookup;
+opened read-only with a busy timeout; columns selected by name; a session's
+totals taken from its latest row, never summed across rows. The current
+quota comes from limits.json, through limits.read(). Nothing here writes.
+
+detect reports `stale` from the same on-disk check `ts doctor` makes
+(machine.plugin_installs), so the hub and the doctor never disagree.
+"""
+import json
+import os
+import re
+import sqlite3
+import sys
+import urllib.parse
+from datetime import datetime, timedelta, timezone
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "scripts", "lib"))
+
+import history  # noqa: E402
+import limits  # noqa: E402
+import machine  # noqa: E402
+
+NEEDS_SCHEMA = 2  # rate_limits_observed_at and source arrived in schema 2
+DAYS = 30
+RECENT = 20
+TS = os.path.join(ROOT, "scripts", "ts")
+# Only a Claude Code session ID can link to the hub's session page; anything
+# else (an imported row from another recorder, say) stays plain text.
+UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+LATEST = """
+WITH ranked AS (
+  SELECT session_id, recorded_at, cc_cost_usd, project_dir, model_name,
+         lines_added, lines_removed,
+         row_number() OVER (PARTITION BY session_id ORDER BY recorded_at DESC, id DESC) AS n,
+         min(recorded_at) OVER (PARTITION BY session_id) AS started
+  FROM snapshots)
+SELECT session_id, recorded_at, cc_cost_usd, project_dir, model_name,
+       lines_added, lines_removed, started
+FROM ranked WHERE n = 1
+"""
+
+
+def out(value):
+    json.dump(value, sys.stdout)
+    sys.stdout.write("\n")
+
+
+def version():
+    with open(os.path.join(ROOT, ".claude-plugin", "plugin.json"), encoding="utf-8") as f:
+        return json.load(f)["version"]
+
+
+def connect(path):
+    uri = "file:%s?mode=ro" % urllib.parse.quote(path)
+    db = sqlite3.connect(uri, uri=True, timeout=1.0)
+    db.row_factory = sqlite3.Row
+    return db
+
+
+def utc(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def local(text):
+    """A history time (UTC, ISO 8601) as local time, for a person."""
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M")
+    except (ValueError, AttributeError):
+        return text
+
+
+def session_cell(sid):
+    return {"ref": "session", "id": sid, "label": sid[:8]} if UUID.match(sid or "") else sid
+
+
+def money(v):
+    return round(v, 2) if v is not None else None
+
+
+def detect():
+    path = history.db_path()
+    if path is None:
+        return out({"state": "off", "reason": "recording is off (TS_HISTORY is set to off)"})
+    if not os.path.isfile(path):
+        return out({"state": "not_set_up", "reason": "nothing recorded yet: there is no history at %s" % path,
+                    "fix": "%s fixes apply statusline, then restart Claude Code" % TS})
+    try:
+        db = connect(path)
+        schema = db.execute("PRAGMA user_version").fetchone()[0]
+        db.execute("SELECT 1 FROM snapshots LIMIT 1").fetchall()
+        db.close()
+    except sqlite3.Error as e:
+        return out({"state": "broken", "reason": "the history at %s could not be read (%s)" % (path, e)})
+    if schema < NEEDS_SCHEMA:
+        return out({"state": "incompatible",
+                    "reason": "the history is schema %d; this needs %d or later" % (schema, NEEDS_SCHEMA),
+                    "fix": "open Claude Code: the statusline upgrades the history on its next render"})
+    ver = version()
+    stale = machine.plugin_installs(ROOT, ver)["stale"]
+    if stale:
+        return out({"state": "stale", "reason": stale[0], "tool_version": ver,
+                    "fix": "claude plugin update token-save, then restart Claude Code"})
+    out({"state": "working", "tool_version": ver})
+
+
+def cost_today(db):
+    midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = db.execute("SELECT cc_cost_usd FROM (%s) WHERE started >= ?" % LATEST, (utc(midnight),)).fetchall()
+    total = sum(r["cc_cost_usd"] or 0 for r in rows)
+    out({"kind": "stat", "data": {
+        "value": round(total, 2), "unit": "USD",
+        "label": "%d session(s) started since midnight; Claude Code's estimate, not a bill" % len(rows)}})
+
+
+def cost_per_day(db):
+    today = datetime.now(timezone.utc).date()
+    first = today - timedelta(days=DAYS - 1)
+    rows = db.execute("SELECT date(started) AS day, sum(cc_cost_usd) AS cost FROM (%s) "
+                      "WHERE started >= ? GROUP BY day" % LATEST, (first.isoformat(),)).fetchall()
+    by_day = {r["day"]: r["cost"] or 0 for r in rows}
+    points = []
+    for i in range(DAYS):
+        day = (first + timedelta(days=i)).isoformat()
+        points.append({"t": day + "T00:00:00Z", "v": round(by_day.get(day, 0), 2)})
+    out({"kind": "timeseries", "data": {"unit": "USD", "series": [{"name": "cost", "points": points}]}})
+
+
+def quota(window):
+    """One quota window from limits.json, or why there is no reading."""
+    entry = limits.read().get(window)
+    if not isinstance(entry, dict) or entry.get("used_percentage") is None:
+        return out({"kind": "stat", "data": {"value": "—", "label": "not observed yet"}})
+    resets = entry.get("resets_at")
+    now = datetime.now(timezone.utc).timestamp()
+    if isinstance(resets, (int, float)) and resets <= now:
+        when = datetime.fromtimestamp(resets).astimezone().strftime("%Y-%m-%d %H:%M")
+        return out({"kind": "stat", "data": {"value": "—", "label": "the window reset at %s; no reading since" % when}})
+    label = "used"
+    if isinstance(resets, (int, float)):
+        label = "used; resets %s" % datetime.fromtimestamp(resets).astimezone().strftime("%a %H:%M")
+    result = {"kind": "stat", "data": {"value": round(entry["used_percentage"]), "unit": "%", "label": label}}
+    if isinstance(entry.get("observed_at"), str):
+        result["as_of"] = entry["observed_at"]
+    out(result)
+
+
+def sessions(db):
+    rows = db.execute("SELECT * FROM (%s) ORDER BY recorded_at DESC LIMIT ?" % LATEST, (RECENT,)).fetchall()
+    out({"kind": "table", "data": {
+        "columns": [
+            {"id": "session", "title": "Session"},
+            {"id": "project", "title": "Project"},
+            {"id": "model", "title": "Model"},
+            {"id": "cost", "title": "Cost", "unit": "USD"},
+            {"id": "lines", "title": "Lines"},
+            {"id": "last", "title": "Last recorded"},
+        ],
+        "rows": [{
+            "session": session_cell(r["session_id"]),
+            "project": r["project_dir"],
+            "model": r["model_name"],
+            "cost": money(r["cc_cost_usd"]),
+            "lines": None if r["lines_added"] is None else "+%d −%d" % (r["lines_added"], r["lines_removed"] or 0),
+            "last": local(r["recorded_at"]),
+        } for r in rows],
+    }})
+
+
+def projects(db):
+    first = (datetime.now(timezone.utc).date() - timedelta(days=DAYS - 1)).isoformat()
+    rows = db.execute("SELECT project_dir, count(*) AS sessions, sum(cc_cost_usd) AS cost FROM (%s) "
+                      "WHERE started >= ? GROUP BY project_dir ORDER BY cost DESC LIMIT 15" % LATEST,
+                      (first,)).fetchall()
+    out({"kind": "table", "data": {
+        "columns": [
+            {"id": "project", "title": "Project"},
+            {"id": "sessions", "title": "Sessions"},
+            {"id": "cost", "title": "Cost", "unit": "USD"},
+        ],
+        "rows": [{"project": r["project_dir"], "sessions": r["sessions"], "cost": money(r["cost"])} for r in rows],
+    }})
+
+
+def show_session(db, sid):
+    rows = db.execute("SELECT recorded_at, cc_cost_usd, model_name, effort, project_dir, git_branch, "
+                      "lines_added, lines_removed, duration_ms, ctx_pct, prompt_cache_hit_ratio "
+                      "FROM snapshots WHERE session_id = ? ORDER BY recorded_at, id", (sid,)).fetchall()
+    if not rows:
+        return out({"widgets": []})
+    last = rows[-1]
+    peak = max((r["ctx_pct"] for r in rows if r["ctx_pct"] is not None), default=None)
+    facts = [
+        ("Model", " ".join(x for x in (last["model_name"], last["effort"] and "(%s)" % last["effort"]) if x)),
+        ("Project", last["project_dir"]),
+        ("Branch", last["git_branch"]),
+        ("Lines", None if last["lines_added"] is None
+         else "+%d −%d" % (last["lines_added"], last["lines_removed"] or 0)),
+        ("Duration", None if last["duration_ms"] is None else "%d min" % round(last["duration_ms"] / 60000)),
+        ("Peak context used", None if peak is None else "%d%%" % round(peak)),
+        ("Prompt cache hit ratio", None if last["prompt_cache_hit_ratio"] is None
+         else "%d%%" % round(last["prompt_cache_hit_ratio"] * 100)),
+    ]
+    points = [{"t": r["recorded_at"], "v": r["cc_cost_usd"]} for r in rows]
+    out({"widgets": [
+        {"id": "cost", "kind": "stat", "title": "Estimated cost",
+         "data": {"value": money(last["cc_cost_usd"]) if last["cc_cost_usd"] is not None else "—",
+                  "unit": "USD", "label": "Claude Code's estimate, not a bill"}},
+        {"id": "cost-over-time", "kind": "timeseries", "title": "Cost over the session",
+         "data": {"unit": "USD", "series": [{"name": "cost", "points": points}]}},
+        {"id": "details", "kind": "list", "title": "From token-save's history",
+         "data": {"items": [{"text": k, "detail": v} for k, v in facts if v]}},
+    ]})
+
+
+WIDGETS = {"cost-today": cost_today, "cost": cost_per_day, "sessions": sessions, "projects": projects}
+
+
+def main(argv):
+    cmd = argv[1:]
+    if cmd == ["detect"]:
+        return detect()
+    if cmd[:1] == ["fetch"] and len(cmd) == 2 and cmd[1] in ("five-hour", "seven-day"):
+        return quota(cmd[1].replace("-", "_"))
+    if (cmd[:1] == ["fetch"] and len(cmd) == 2 and cmd[1] in WIDGETS) or \
+            (cmd[:2] == ["show", "session"] and len(cmd) == 3):
+        path = history.db_path()
+        if path is None or not os.path.isfile(path):
+            print("no history to read; run detect", file=sys.stderr)
+            sys.exit(1)
+        db = connect(path)
+        try:
+            return WIDGETS[cmd[1]](db) if cmd[0] == "fetch" else show_session(db, cmd[2])
+        finally:
+            db.close()
+    print("unknown command: %s" % " ".join(cmd), file=sys.stderr)
+    sys.exit(2)
+
+
+if __name__ == "__main__":
+    main(sys.argv)
