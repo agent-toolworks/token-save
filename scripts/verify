@@ -3881,6 +3881,11 @@ f = load("five-hour.json")
 check(f.get("data", {}).get("value") == 23 and f["data"].get("unit") == "%" and "as_of" in f,
       "the 5-hour quota comes from limits.json, with when it was observed",
       "five-hour: %s" % f)
+want_reset = json.load(open(os.path.join(d, "limits.json")))["five_hour"]["resets_at"]
+got_reset = f.get("data", {}).get("resets_at", "")
+check(got_reset.endswith("Z") and datetime.fromisoformat(got_reset.replace("Z", "+00:00")).timestamp() == want_reset,
+      "the 5-hour quota says when it resets, as a time the hub can count down to (resets_at)",
+      "five-hour resets_at %r, limits.json %r" % (got_reset, want_reset))
 v = load("seven-day.json")
 check(v.get("data", {}).get("value") == "—" and "reset" in v["data"].get("label", ""),
       "a quota window whose resets_at has passed shows no number",
