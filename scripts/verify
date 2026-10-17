@@ -3541,7 +3541,7 @@ fi
 python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute("create table snapshots (id integer primary key, recorded_at text, session_id text)"); d.execute("insert into snapshots (recorded_at, session_id) values (\"2026-01-01T00:00:00Z\", \"old\")"); d.commit()' "$TMP/older.db"
 slsay "$(slpay 2 1)" TS_HISTORY_DB="$TMP/older.db"
 result=$(python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute("pragma user_version").fetchone()[0], d.execute("select count(*), count(cc_cost_usd) from snapshots").fetchone())' "$TMP/older.db")
-if slline_ok && [[ $result == "3 (2, 1)" ]]; then
+if slline_ok && [[ $result == "4 (2, 1)" ]]; then
   ok "history: an older table gains the new columns and keeps its rows"
 else
   bad "history: did not bring an older table up to date" "got [$result]"
@@ -3771,6 +3771,33 @@ if [[ $r == "1|0" ]] && slline_ok; then
   ok "history: ctx_pct is NULL when the payload reports none, never a derived 0"
 else
   bad "history: ctx_pct was derived" "got [$r]"
+fi
+
+# The third review: the fields only some sessions carry (schema 4), and the
+# shapes of a normal first render, which are not drift.
+printf '{"session_id":"ffffffff-1","model":{"display_name":"Opus 5.5"},"agent_type":"Explore",
+  "context_window":{"used_percentage":null,"total_input_tokens":0,"current_usage":null},
+  "workspace":{"current_dir":"/w","git_worktree":"feat"},"vim":{"mode":"INSERT"},"agent":{"name":"rev"},
+  "pr":{"number":42,"url":"https://h/o/n/pull/42","review_state":"pending","kind":"mr"},
+  "worktree":{"name":"f","path":"/w","branch":"wt-f","original_cwd":"/o","original_branch":"main"},
+  "rate_limits":{"spend_limit":{"used_percentage":62.8,"resets_at":1740787200,"used_usd":314.12,"limit_usd":500,"period":"monthly"}}}' \
+  > "$V2/s4.json"
+slsay "$(cat "$V2/s4.json")" TS_HISTORY_DB="$V2/s4.db"
+r=$(v2db "$V2/s4.db" "select git_worktree, worktree_name, worktree_path, worktree_branch, worktree_original_cwd, worktree_original_branch, pr_number, pr_url, pr_review_state, pr_kind, agent_name, agent_type, spend_limit_pct, spend_limit_resets_at, spend_limit_used_usd, spend_limit_limit_usd, spend_limit_period, last_input_tokens is null, unknown_keys, raw_payload from snapshots")
+want='feat|f|/w|wt-f|/o|main|42|https://h/o/n/pull/42|pending|mr|rev|Explore|62.8|1740787200|314.12|500.0|monthly|1||'
+if [[ $r == "$want" ]] && slline_ok; then
+  ok "history: worktree, pr, agent and spend_limit have columns; current_usage null and vim.mode trip no canary"
+else
+  bad "history: schema 4 fields not recorded as expected" "got  [$r]
+        want [$want]"
+fi
+# null stands for an empty object; a value of another type there is drift.
+slsay '{"session_id":"ffffffff-2","model":{"display_name":"Opus 5.5"},"pr":"#42"}' TS_HISTORY_DB="$V2/s4b.db"
+r=$(v2db "$V2/s4b.db" "select unknown_keys from snapshots")
+if [[ $r == '["pr"]' ]]; then
+  ok "history: a scalar where a known object belongs is listed in unknown_keys"
+else
+  bad "history: a known object of the wrong type was not reported" "got [$r]"
 fi
 
 # ---------------------------------------------------------------------------

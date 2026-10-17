@@ -39,7 +39,7 @@ import sqlite3
 # Bumped on any change to COLUMNS. A database written by a NEWER version is
 # left alone rather than written with a narrower row: two versions can be
 # installed side by side, and the older one must not damage the newer's data.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # (column, type, what it is). The order is the table's column order, and new
 # columns only ever go at the end.
@@ -111,6 +111,24 @@ COLUMNS = [
     ("prompt_cache_recache_tokens_if_cold", "INTEGER", "prompt_cache.recache_tokens_if_cold"),
     ("prompt_cache_miss_causes", "TEXT", "prompt_cache.miss_causes, as JSON"),
     ("prompt_cache_last_miss_cause", "TEXT", "prompt_cache.last_miss_cause, as JSON"),
+    # -- schema 4 --
+    ("git_worktree", "TEXT", "workspace.git_worktree: linked git worktree name"),
+    ("worktree_name", "TEXT", "worktree.name: the worktree session's worktree"),
+    ("worktree_path", "TEXT", "worktree.path"),
+    ("worktree_branch", "TEXT", "worktree.branch"),
+    ("worktree_original_cwd", "TEXT", "worktree.original_cwd"),
+    ("worktree_original_branch", "TEXT", "worktree.original_branch"),
+    ("pr_number", "INTEGER", "pr.number: open PR (or GitLab MR) for the branch"),
+    ("pr_url", "TEXT", "pr.url"),
+    ("pr_review_state", "TEXT", "pr.review_state"),
+    ("pr_kind", "TEXT", "pr.kind: mr for a GitLab merge request"),
+    ("agent_name", "TEXT", "agent.name, with --agent or agent settings"),
+    ("agent_type", "TEXT", "agent_type, as reported"),
+    ("spend_limit_pct", "REAL", "gateway spend limit used, %"),
+    ("spend_limit_resets_at", "INTEGER", "gateway spend limit period reset, epoch seconds"),
+    ("spend_limit_used_usd", "REAL", "gateway spend so far, US dollars (its estimate)"),
+    ("spend_limit_limit_usd", "REAL", "gateway spend limit, US dollars"),
+    ("spend_limit_period", "TEXT", "gateway spend limit period: daily, weekly or monthly"),
 ]
 NAMES = [c[0] for c in COLUMNS]
 
@@ -187,16 +205,38 @@ FIELDS = [
     ("prompt_cache.recache_tokens_if_cold", "prompt_cache_recache_tokens_if_cold", "int"),
     ("prompt_cache.miss_causes", "prompt_cache_miss_causes", "json"),
     ("prompt_cache.last_miss_cause", "prompt_cache_last_miss_cause", "json"),
+    ("workspace.git_worktree", "git_worktree", "str"),
+    ("worktree.name", "worktree_name", "str"),
+    ("worktree.path", "worktree_path", "str"),
+    ("worktree.branch", "worktree_branch", "str"),
+    ("worktree.original_cwd", "worktree_original_cwd", "str"),
+    ("worktree.original_branch", "worktree_original_branch", "str"),
+    ("pr.number", "pr_number", "int"),
+    ("pr.url", "pr_url", "str"),
+    ("pr.review_state", "pr_review_state", "str"),
+    ("pr.kind", "pr_kind", "str"),
+    ("agent.name", "agent_name", "str"),
+    ("agent_type", "agent_type", "str"),
+    ("rate_limits.spend_limit.used_percentage", "spend_limit_pct", "num"),
+    ("rate_limits.spend_limit.resets_at", "spend_limit_resets_at", "int"),
+    ("rate_limits.spend_limit.used_usd", "spend_limit_used_usd", "num"),
+    ("rate_limits.spend_limit.limit_usd", "spend_limit_limit_usd", "num"),
+    ("rate_limits.spend_limit.period", "spend_limit_period", "str"),
 ]
-# Recognised and deliberately not kept: it names the hook, the same on every
-# render.
-IGNORED_LEAVES = frozenset({"hook_event_name"})
+# Recognised and deliberately not kept. hook_event_name names the hook, the
+# same on every render. vim.mode flips between NORMAL and INSERT as the person
+# types, and each flip renders: a column for it would write a row per
+# keystroke mode change, and it says nothing about usage.
+IGNORED_LEAVES = frozenset({"hook_event_name", "vim.mode"})
 _JSON_PATHS = tuple(f[0] for f in FIELDS if f[2] == "json")
 _PATHS = frozenset(f[0] for f in FIELDS)
-
-# The quota reading as one value: all four arrive in the same API response.
-RATE_LIMIT_KEY = ("five_hour_pct", "five_hour_resets_at",
-                  "seven_day_pct", "seven_day_resets_at")
+# The objects the known fields sit in. Claude Code sends some of them as null
+# or {} when there is nothing in them yet -- context_window.current_usage is
+# null before a session's first API response and again after /compact -- and
+# that is the normal shape of the payload, so its fields are simply NULL.
+_OBJECTS = frozenset(path.rsplit(".", i)[0]
+                     for path in _PATHS | IGNORED_LEAVES
+                     for i in range(1, path.count(".") + 1))
 
 # How long to wait for another session's write. Several sessions render at
 # once; a writer holds the lock for well under a millisecond, so this only
@@ -288,16 +328,20 @@ def _convert(kind, v):
 
 
 def payload_leaves(p, prefix=""):
-    """Dotted paths of every leaf. A list is a leaf; so is null."""
+    """(dotted path, value) of every leaf. A list is a leaf; so are null and {}."""
     for k, v in p.items():
         path = prefix + k
         if isinstance(v, dict) and v:
             yield from payload_leaves(v, path + ".")
         else:
-            yield path
+            yield path, v
 
 
-def _known(path) -> bool:
+def _known(path, v) -> bool:
+    if path in _OBJECTS:
+        # null or {} where an object belongs is an empty one; anything else
+        # there is a type change.
+        return v is None or v == {}
     return path in _PATHS or path in IGNORED_LEAVES or \
         any(path.startswith(j + ".") for j in _JSON_PATHS)
 
@@ -339,7 +383,7 @@ def row_from_payload(p: dict, now: dict = None, branch=None,
         "rate_limits_observed_at": None,      # observed_at(), against the previous row
         "source": source,
     })
-    unknown = sorted(set(drift) | {k for k in payload_leaves(p) if not _known(k)})
+    unknown = sorted(set(drift) | {k for k, v in payload_leaves(p) if not _known(k, v)})
     if unknown:
         row["unknown_keys"] = json.dumps(unknown)
         row["raw_payload"] = json.dumps(p, ensure_ascii=False, sort_keys=True)

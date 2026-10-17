@@ -18,7 +18,7 @@ the writer itself uses:
 ```json
 {
   "tool_version": "0.25.0",
-  "schema_version": 3,
+  "schema_version": 4,
   "database": "/Users/you/.claude/token-save/history.db",
   "table": "snapshots",
   "columns": [
@@ -66,7 +66,7 @@ statusline's own working state and is not part of this contract.
 
 ## Versioning
 
-`PRAGMA user_version` is the schema version. It is `3` today.
+`PRAGMA user_version` is the schema version. It is `4` today.
 
 - **Columns are only ever added.** A column is never renamed, removed, re-typed
   or given a new meaning. When columns are added, `user_version` goes up, and
@@ -84,6 +84,7 @@ statusline's own working state and is not part of this contract.
 | 1 | the first 26 columns, `recorded_at` to `ts_version` |
 | 2 | every remaining payload field, `rate_limits_observed_at`, `source`, and the drift canary (`unknown_keys`, `raw_payload`) |
 | 3 | the fields Claude Code added since: `scratchpad_dir`, `workspace.repo.*`, `prompt_cache.*` |
+| 4 | the fields Claude Code sends in some sessions only: `workspace.git_worktree`, `worktree.*`, `pr.*`, `agent.name`, `agent_type`, `rate_limits.spend_limit.*` |
 
 ## What a row is
 
@@ -120,7 +121,12 @@ also carries the whole payload in `raw_payload`. A Claude Code upgrade that
 adds or changes a field shows up there, rather than as a silent `NULL`,
 without the raw JSON being stored on every row. Fields whose keys vary
 (`added_dirs`, `prompt_cache.miss_causes`, `prompt_cache.last_miss_cause`) are
-stored whole as JSON, so new keys inside them are not drift.
+stored whole as JSON, so new keys inside them are not drift. An object sent
+as `null` or `{}` is an empty one, not drift: `context_window.current_usage`
+is `null` before a session's first API response and again after `/compact`,
+and its columns are then `NULL`. Two fields are recognised and not kept:
+`hook_event_name`, the same on every render, and `vim.mode`, which changes
+with every switch between NORMAL and INSERT and says nothing about usage.
 
 ## Columns
 
@@ -191,6 +197,23 @@ stored whole as JSON, so new keys inside them are not drift.
 | `prompt_cache_recache_tokens_if_cold` | INTEGER | `prompt_cache.recache_tokens_if_cold` |
 | `prompt_cache_miss_causes` | TEXT | `prompt_cache.miss_causes`, as JSON; its keys vary |
 | `prompt_cache_last_miss_cause` | TEXT | `prompt_cache.last_miss_cause`, as JSON |
+| `git_worktree` | TEXT | `workspace.git_worktree`: the linked git worktree `cwd` is in, for any `git worktree add` worktree; `NULL` in the main working tree |
+| `worktree_name` | TEXT | `worktree.name`: set only while the session is in a Claude Code worktree session |
+| `worktree_path` | TEXT | `worktree.path`, the worktree directory |
+| `worktree_branch` | TEXT | `worktree.branch`; `NULL` for hook-based worktrees |
+| `worktree_original_cwd` | TEXT | `worktree.original_cwd`, the directory before entering the worktree |
+| `worktree_original_branch` | TEXT | `worktree.original_branch`; `NULL` for hook-based worktrees |
+| `pr_number` | INTEGER | `pr.number`: the open pull request for the branch, or the merge request number on GitLab. `NULL` until one is found and once it merges or closes |
+| `pr_url` | TEXT | `pr.url` |
+| `pr_review_state` | TEXT | `pr.review_state`: `approved`, `pending`, `changes_requested` or `draft`; may be `NULL` while `pr_number` is set |
+| `pr_kind` | TEXT | `pr.kind`: `mr` for a GitLab merge request, `NULL` for a GitHub pull request |
+| `agent_name` | TEXT | `agent.name`, when running with `--agent` or agent settings |
+| `agent_type` | TEXT | `agent_type`, as reported |
+| `spend_limit_pct` | REAL | behind a Claude apps gateway: spend limit used, 0 to 100 or above once exceeded |
+| `spend_limit_resets_at` | INTEGER | when the spend limit's period resets, in epoch seconds |
+| `spend_limit_used_usd` | REAL | spend so far in US dollars, the gateway's estimate. It can be about five minutes older than `spend_limit_pct` |
+| `spend_limit_limit_usd` | REAL | the spend limit, in US dollars |
+| `spend_limit_period` | TEXT | the spend limit's period: `daily`, `weekly` or `monthly` |
 
 `scripts/verify` checks that this table names the same columns, with the same
 types and in the same order, as the writer, so the two cannot drift apart.
