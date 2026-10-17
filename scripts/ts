@@ -19,7 +19,7 @@ done
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 LIB="$ROOT/scripts/lib"
 
-TS_VERSION="0.24.0"
+TS_VERSION="0.25.0"
 # Exported so the Python side can stamp it into a shared profile. A
 # profile that cannot say which version produced it cannot be compared
 # with another one, which is the whole purpose of collecting them.
@@ -48,6 +48,16 @@ COMMANDS
   fixes            list | show <id> | apply <id> [--yes] | revert <id>
   share            A profile of this machine safe to send to someone else:
                    shape only, no paths, names, commands or contents.
+  statusline       The whole statusline, from the session JSON on stdin, and
+                   a row in the local history for each change it shows.
+                   --explain says what it read and would record; --schema
+                   prints the history's columns as JSON, for tools that read
+                   it. Install it with: ts fixes apply statusline
+  limits           The freshest 5h and 7d quota reading across sessions.
+                   --json for tools.
+  history          import FILE [--dry-run]: bring an existing statusline
+                   history (JSONL of {"recorded_at", "payload"}) into the
+                   local one. Safe to re-run.
   version          Print the version.
 
 COMMON OPTIONS  (audit, advise)
@@ -83,6 +93,9 @@ WHY THIS EXISTS
 ENVIRONMENT
   TS_TRANSCRIPT_DIR   Where transcripts live (default ~/.claude/projects).
   CLAUDE_CONFIG_DIR   Claude Code config dir (default ~/.claude).
+  TS_HISTORY_DB       Statusline history database
+                      (default $CLAUDE_CONFIG_DIR/token-save/history.db).
+  TS_HISTORY=off      Show the statusline without recording it.
   NO_COLOR            Disable colour.
 EOF
 }
@@ -116,6 +129,20 @@ case "$cmd" in
   fixes)
     have_python || die "ts: python3 is required and was not found on PATH"
     exec python3 "$LIB/fixes.py" "$@"
+    ;;
+  statusline)
+    # Runs inside a prompt: without python3 it prints nothing rather than an
+    # error, like everything else on this path.
+    have_python || exit 0
+    exec python3 "$LIB/cmd_statusline.py" "$@"
+    ;;
+  limits)
+    have_python || die "ts: python3 is required and was not found on PATH"
+    exec python3 "$LIB/limits.py" "$@"
+    ;;
+  history)
+    have_python || die "ts: python3 is required and was not found on PATH"
+    exec python3 "$LIB/cmd_history.py" "$@"
     ;;
   share)
     have_python || die "ts: python3 is required and was not found on PATH"

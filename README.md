@@ -68,6 +68,9 @@ Nothing is sent anywhere. There is no network code in this repository.
 | What can be changed mechanically? | `ts fixes list` |
 | Preview / apply / undo one | `ts fixes show\|apply\|revert <id>` |
 | Send my numbers to someone, safely | `ts share` |
+| A full statusline, and a history of what it showed | `ts statusline` — see [docs/statusline.md](docs/statusline.md) |
+| The freshest quota reading across sessions | `ts limits` |
+| Import a history kept by another recorder | `ts history import FILE` |
 
 `--json` on `audit`, `advise` and `doctor` for machine-readable output.
 
@@ -102,6 +105,19 @@ is your call, and the output says so every time instead of pretending
 otherwise.
 
 ### In your statusline
+
+**The whole line.** token-save ships a complete statusline: directory and branch,
+model and effort, context, the `ts now` segment below, session cost, and the 5h
+and 7d quota. It also records each change into a local SQLite history, because
+the quota and Claude Code's cost figure reach nothing else that keeps them
+(#41). `ts fixes apply statusline` installs it: it shows the diff first, keeps
+any statusline you already had, and reverts. [docs/statusline.md](docs/statusline.md)
+covers installing it, what a row holds, querying it, and turning recording
+off. [docs/history-schema.md](docs/history-schema.md) is the contract for
+tools that read the history: every column, how to open the file while it is
+being written, and what may change between versions.
+
+**Only the segment**, for a statusline you already have:
 
 ```sh
 ts now --statusline        # ->  423K +530/t clear>1t
@@ -265,7 +281,10 @@ so the ranking can never disagree with its own numbers.
   distribution says it is.
 - **It does not estimate money.** Prices change and vary by plan; it reports
   *cost units* (tokens re-weighted by what each kind costs relative to one
-  input token), which is what actually ranks the findings.
+  input token), which is what actually ranks the findings. The statusline
+  shows and records a dollar figure, but it is Claude Code's own estimate,
+  passed through as reported and stored as `cc_cost_usd` so the column says
+  whose number it is.
 
 ## Fixes that are safe to script
 
@@ -273,6 +292,7 @@ so the ranking can never disagree with its own numbers.
 |---|---|
 | `terse-output` | appends a response-style block to `CLAUDE.md` |
 | `tool-search` | sets `ENABLE_TOOL_SEARCH=true` when a custom base URL has disabled tool deferral |
+| `statusline` | installs token-save's statusline, which records the history; any statusline you had is kept and comes back on revert |
 
 Every one shows a diff first (`--dry-run` is the default), writes a timestamped
 backup, is idempotent, and reverts. A fix that cannot meet all four does not
@@ -341,7 +361,9 @@ refused rather than overwritten and that the statusline cannot hang — the
 command classifier behind the Bash leaderboard, detector coverage (every entry
 in the catalogue must have a fixture that fires it, or a named exemption),
 version agreement, redaction against a planted canary, the live signal's
-arithmetic, and argument validation. It also checks that the catalogue listed
+arithmetic, argument validation, and the statusline and its history (every
+segment rendered, one row per change, and a line that survives a broken
+database). It also checks that the catalogue listed
 above is the one the code runs.
 
 ## Licence

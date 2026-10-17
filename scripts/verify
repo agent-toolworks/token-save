@@ -257,7 +257,7 @@ grep -qi traceback "$TMP/empty.err" \
   && bad "empty transcript root produced a traceback" \
   || ok "empty transcript root reports cleanly"
 
-for fid in terse-output tool-search; do
+for fid in terse-output tool-search statusline; do
   "$TS" fixes apply "$fid" --yes >/dev/null 2>&1
   a=$("$TS" fixes show "$fid" 2>/dev/null | grep -c "applied" || true)
   "$TS" fixes apply "$fid" --yes >"$TMP/second.$fid" 2>&1
@@ -309,7 +309,7 @@ for variant in trailing no-trailing; do
   printf '{\n  "model": "opus"\n}\n' > "$RCFG/settings.json"
   cp "$RCFG/CLAUDE.md" "$RCFG/md.orig"
   cp "$RCFG/settings.json" "$RCFG/js.orig"
-  for fid in terse-output tool-search; do
+  for fid in terse-output tool-search statusline; do
     CLAUDE_CONFIG_DIR="$RCFG" "$TS" fixes apply "$fid" --yes >/dev/null 2>&1
     CLAUDE_CONFIG_DIR="$RCFG" "$TS" fixes revert "$fid" >/dev/null 2>&1
   done
@@ -3266,6 +3266,538 @@ if grep -q 'TS_TRANSCRIPT_DIR' "$TMP/proj.err"; then
       "$(head -3 "$TMP/proj.err")"
 else
   ok "an unmatched --project does not blame the transcript root"
+fi
+
+# ---------------------------------------------------------------------------
+head_ "10. STATUSLINE AND HISTORY  (ts statusline, #41)"
+# ---------------------------------------------------------------------------
+# The full statusline prints what Claude Code hands it and records each change
+# in a SQLite history. Two promises are checked here: the line survives
+# anything the history can do wrong, and the history holds what the line
+# showed -- once per change, not once per render.
+SLDB="$TMP/history/h.db"
+sltx=$(find "$TMP/bulk" -name '*.jsonl' -not -path '*/subagents/*' | head -1)
+slnow=$(date +%s)
+slpay() { # cost duration -> a full payload
+  printf '{"session_id":"sess-1","transcript_path":"%s","version":"9.9.9",
+  "model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"effort":{"level":"high"},
+  "workspace":{"current_dir":"%s","project_dir":"%s"},
+  "cost":{"total_cost_usd":%s,"total_duration_ms":%s,"total_api_duration_ms":3000,
+          "total_lines_added":10,"total_lines_removed":2},
+  "context_window":{"total_input_tokens":40000,"total_output_tokens":2000,
+                    "context_window_size":200000,"used_percentage":21},
+  "rate_limits":{"five_hour":{"used_percentage":23.4,"resets_at":%s},
+                 "seven_day":{"used_percentage":9,"resets_at":%s}}}' \
+    "$sltx" "$TMP" "$TMP" "$1" "$2" $((slnow + 8100)) $((slnow + 300000))
+}
+slsay() { # stdin-json [env...] -> $TMP/st.out (ANSI stripped), .raw, .err, .rc
+  local json=$1; shift
+  printf '%s' "$json" | bounded 20 env TS_HISTORY_DB="$SLDB" "$@" "$TS" statusline \
+    >"$TMP/st.raw" 2>"$TMP/st.err"
+  echo $? >"$TMP/st.rc"
+  sed $'s/\033\\[[0-9;]*m//g' "$TMP/st.raw" >"$TMP/st.out"
+}
+slrows() { # db -> row count, or "none" when the file was never created
+  [[ -f $1 ]] || { echo none; return; }
+  python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("select count(*) from snapshots").fetchone()[0])' "$1"
+}
+slline_ok() {
+  [[ $(cat "$TMP/st.out") == *"Opus 5.5"* && ! -s $TMP/st.err && $(cat "$TMP/st.rc") == 0 ]]
+}
+
+slsay "$(slpay 1.2345 5000)"
+line=$(cat "$TMP/st.out")
+missing=""
+for want in "Opus 5.5 (high)" "ctx 21% free 160.0k" "/t" "\$1.23" "5h 23% used(2h1" \
+            "7d 9% used(3d11h)" "/${TMP##*/}"; do
+  [[ $line == *"$want"* ]] || missing+=" [$want]"
+done
+if [[ -z $missing && ! -s $TMP/st.err && $(cat "$TMP/st.rc") == 0 ]]; then
+  ok "ts statusline: a full payload renders every segment"
+else
+  bad "ts statusline left out a segment:$missing" "got [$line] err [$(head -1 "$TMP/st.err")]"
+fi
+if grep -q $'\033\\[' "$TMP/st.raw"; then
+  ok "ts statusline: coloured although stdout is not a terminal"
+else
+  bad "ts statusline printed no colour; Claude Code renders it, so the line went flat"
+fi
+
+# The row holds what the line showed. Expected values are the payload's own.
+result=$(python3 - "$SLDB" <<'ROW'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1]); db.row_factory = sqlite3.Row
+r = db.execute("select * from snapshots").fetchone()
+want = {"session_id": "sess-1", "claude_version": "9.9.9", "model_id": "claude-opus-5-5",
+        "model_name": "Opus 5.5", "effort": "high", "ctx_tokens": 42000, "ctx_size": 200000,
+        "ctx_pct": 21, "cc_cost_usd": 1.2345, "duration_ms": 5000, "api_duration_ms": 3000,
+        "lines_added": 10, "lines_removed": 2, "five_hour_pct": 23.4, "seven_day_pct": 9}
+bad = ["%s=%r want %r" % (k, r[k], v) for k, v in want.items() if r[k] != v]
+for k in ("ts_context", "ctx_growth_per_turn", "recorded_at", "ts_version",
+          "five_hour_resets_at", "seven_day_resets_at", "transcript_path", "cwd"):
+    if r[k] is None:
+        bad.append("%s is empty" % k)
+print("|".join(bad))
+ROW
+)
+if [[ -z $result ]]; then
+  ok "history: the row holds the price, the session id and what the line showed"
+else
+  bad "history: the row disagrees with the payload" "${result//|/$'\n        '}"
+fi
+
+# Both branches of the dedupe: a re-render of the same state, and one where
+# only the wall clock moved, add nothing; a change in price adds a row.
+slsay "$(slpay 1.2345 5000)"; slsay "$(slpay 1.2345 9000)"
+n1=$(slrows "$SLDB")
+slsay "$(slpay 1.5 9000)"
+n2=$(slrows "$SLDB")
+if [[ $n1 == 1 && $n2 == 2 ]]; then
+  ok "history: one row per change -- a re-render adds none, a new price adds one"
+else
+  bad "history: dedupe is wrong" "after re-renders: $n1 rows (want 1); after a price change: $n2 (want 2)"
+fi
+
+# The line must survive the history: unwritable, not a database, turned off,
+# or written by a newer schema. Each must still print and stay silent.
+: > "$TMP/notadir"
+slsay "$(slpay 2 1)" TS_HISTORY_DB="$TMP/notadir/h.db"
+if slline_ok; then
+  ok "history: an unwritable database costs the row, not the line"
+else
+  bad "history: an unwritable database broke the line" "out [$(cat "$TMP/st.out")] err [$(head -1 "$TMP/st.err")]"
+fi
+for _ in {1..200}; do echo 'not a database at all'; done > "$TMP/garbage.db"
+slsay "$(slpay 2 1)" TS_HISTORY_DB="$TMP/garbage.db"
+if slline_ok; then
+  ok "history: a file that is not a database costs the row, not the line"
+else
+  bad "history: a corrupt database broke the line" "err [$(head -1 "$TMP/st.err")]"
+fi
+slsay "$(slpay 2 1)" TS_HISTORY=off TS_HISTORY_DB="$TMP/off.db"
+if slline_ok && [[ $(slrows "$TMP/off.db") == none ]]; then
+  ok "history: TS_HISTORY=off shows the line and writes nothing"
+else
+  bad "history: TS_HISTORY=off still recorded, or lost the line" "rows: $(slrows "$TMP/off.db")"
+fi
+python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute("create table snapshots (id integer)"); d.execute("pragma user_version = 99"); d.commit()' "$TMP/newer.db"
+slsay "$(slpay 2 1)" TS_HISTORY_DB="$TMP/newer.db"
+if slline_ok && [[ $(slrows "$TMP/newer.db") == 0 ]]; then
+  ok "history: a database from a newer version is left alone"
+else
+  bad "history: wrote into a newer version's database" "rows: $(slrows "$TMP/newer.db")"
+fi
+
+# Nothing to read: no output, no file, no complaint.
+for label in empty garbage; do
+  case $label in empty) payload="" ;; garbage) payload="not json {{{" ;; esac
+  slsay "$payload" TS_HISTORY_DB="$TMP/nothing.db"
+  if [[ ! -s $TMP/st.out && ! -s $TMP/st.err && $(cat "$TMP/st.rc") == 0 \
+        && $(slrows "$TMP/nothing.db") == none ]]; then
+    ok "ts statusline: $label stdin prints and records nothing, silently"
+  else
+    bad "ts statusline: $label stdin was not handled silently" \
+        "out [$(cat "$TMP/st.out")] err [$(head -1 "$TMP/st.err")] rc $(cat "$TMP/st.rc")"
+  fi
+done
+
+# The wrapper people copy into ~/.claude: it must find the newest ts under any
+# marketplace (the fake cache from section 8), and say why when it finds none.
+WRAP="$ROOT/scripts/statusline.sh"
+out=$(printf '{}' | bounded 20 env CLAUDE_CONFIG_DIR="$slc" bash "$WRAP" 2>"$TMP/wrap.err")
+if [[ $out == "0.10.0 statusline" && ! -s $TMP/wrap.err ]]; then
+  ok "statusline.sh: runs the newest ts across marketplace names"
+else
+  bad "statusline.sh did not run the newest ts" "got [$out]"
+fi
+out=$(slpay 1 1 | bounded 20 env TS_BIN="$TS" TS_HISTORY_DB="$TMP/wrap.db" bash "$WRAP" 2>"$TMP/wrap.err"; echo "rc=$?")
+if [[ $out == *"Opus 5.5"*"rc=0" && ! -s $TMP/wrap.err && $(slrows "$TMP/wrap.db") == 1 ]]; then
+  ok "statusline.sh: passes the session JSON through to ts statusline"
+else
+  bad "statusline.sh did not hand stdin to ts statusline" "got [$out] rows $(slrows "$TMP/wrap.db")"
+fi
+out=$(printf '{}' | bounded 20 env CLAUDE_CONFIG_DIR="$TMP/no-such-config" bash "$WRAP" 2>&1; echo "rc=$?")
+if [[ $out == "rc=0" ]]; then
+  ok "statusline.sh: no ts installed prints nothing, exits 0"
+else
+  bad "statusline.sh complained without a ts" "got [$out]"
+fi
+out=$(printf '{}' | bounded 20 env CLAUDE_CONFIG_DIR="$TMP/no-such-config" bash "$WRAP" --explain 2>&1)
+if [[ $out == *"none found"* ]]; then
+  ok "statusline.sh --explain says when no ts is installed"
+else
+  bad "statusline.sh --explain did not say why it is empty" "$out"
+fi
+slpay 1 1 | bounded 20 env TS_BIN="$TS" TS_HISTORY_DB="$TMP/explain.db" bash "$WRAP" --explain \
+  >"$TMP/explain.out" 2>&1
+if grep -q '^line: ' "$TMP/explain.out" && grep -q 'cc_cost_usd' "$TMP/explain.out" \
+   && [[ $(slrows "$TMP/explain.db") == none ]]; then
+  ok "statusline.sh --explain shows the line and the row, and writes nothing"
+else
+  bad "statusline.sh --explain did not explain, or recorded" "$(head -3 "$TMP/explain.out")"
+fi
+
+# Installing it: `ts fixes apply statusline` is how other people get the line,
+# and most of them already have one. Theirs must survive the install byte for
+# byte, and nothing else in settings.json may move.
+ICFG="$TMP/sl-install"; mkdir -p "$ICFG"
+cat > "$ICFG/settings.json" <<'JSON'
+{
+    "model": "opus",
+    "statusLine": { "type": "command", "command": "~/.claude/statusline.sh" },
+    "note": "policy — written in sentences"
+}
+JSON
+cp "$ICFG/settings.json" "$ICFG/orig"
+CLAUDE_CONFIG_DIR="$ICFG" "$TS" fixes apply statusline --yes >"$TMP/sl-apply.out" 2>&1
+result=$(CLAUDE_CONFIG_DIR="$ICFG" python3 - "$ICFG" <<'PY'
+import json, os, sys
+cfg = sys.argv[1]
+s = json.load(open(os.path.join(cfg, "settings.json"), encoding="utf-8"))
+bad = []
+cmd = (s.get("statusLine") or {}).get("command", "")
+if os.path.expanduser(cmd) != os.path.join(cfg, "token-save", "statusline.sh"):
+    bad.append("statusLine.command is %r" % cmd)
+if s.get("model") != "opus" or s.get("note") != "policy — written in sentences":
+    bad.append("an unrelated key changed")
+w = os.path.join(cfg, "token-save", "statusline.sh")
+if not os.access(w, os.X_OK):
+    bad.append("the wrapper is missing or not executable")
+if not os.path.isfile(os.path.join(cfg, "token-save", "statusline.previous.json")):
+    bad.append("the previous statusLine was not kept")
+if (s.get("statusLine") or {}).get("refreshInterval") != 60:
+    bad.append("refreshInterval is not 60, so an idle line never updates")
+print("|".join(bad))
+PY
+)
+if [[ -z $result ]]; then
+  ok "fix statusline: installs the wrapper and points statusLine at it, other keys untouched"
+else
+  bad "fix statusline: install is wrong" "${result//|/$'\n        '} $(cat "$TMP/sl-apply.out")"
+fi
+out=$(slpay 1 1 | bounded 20 env TS_BIN="$TS" TS_HISTORY_DB="$TMP/installed.db" \
+        bash "$ICFG/token-save/statusline.sh" 2>&1)
+if [[ $out == *"Opus 5.5"* && $(slrows "$TMP/installed.db") == 1 ]]; then
+  ok "fix statusline: the installed wrapper renders the line and records it"
+else
+  bad "fix statusline: the installed wrapper does not work" "got [$out]"
+fi
+CLAUDE_CONFIG_DIR="$ICFG" "$TS" fixes revert statusline >/dev/null 2>&1
+if cmp -s "$ICFG/orig" "$ICFG/settings.json" && [[ ! -e $ICFG/token-save/statusline.sh ]]; then
+  ok "fix statusline: revert puts the previous statusline back byte for byte"
+else
+  bad "fix statusline: revert did not restore the previous statusline" \
+      "$(diff "$ICFG/orig" "$ICFG/settings.json")"
+fi
+# Someone who points statusLine elsewhere after installing has made it theirs.
+CLAUDE_CONFIG_DIR="$ICFG" "$TS" fixes apply statusline --yes >/dev/null 2>&1
+python3 - "$ICFG/settings.json" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p, encoding="utf-8").read()
+i = s.index('"command": "') + len('"command": "'); j = s.index('"', i)
+open(p, "w", encoding="utf-8").write(s[:i] + "/opt/mine.sh" + s[j:])
+PY
+cp "$ICFG/settings.json" "$ICFG/mine"
+CLAUDE_CONFIG_DIR="$ICFG" "$TS" fixes revert statusline >"$TMP/sl-revert.out" 2>&1
+if cmp -s "$ICFG/mine" "$ICFG/settings.json" && grep -q "not applied" "$TMP/sl-revert.out"; then
+  ok "fix statusline: revert leaves a statusLine changed by hand alone"
+else
+  bad "fix statusline: revert overwrote a statusLine it no longer owns" "$(cat "$TMP/sl-revert.out")"
+fi
+
+# The schema is a contract for other tools (docs/history-schema.md). Three
+# copies of it must agree: the table a render creates, `--schema`, and the
+# column table in the doc.
+env TS_HISTORY_DB="$SLDB" "$TS" statusline --schema >"$TMP/schema.json" 2>&1
+# A crash in the check prints nothing on stdout, which would read as a pass.
+result=$(python3 - "$SLDB" "$ROOT/docs/history-schema.md" "$TMP/schema.json" 2>&1 <<'PY' || echo "the check itself failed"
+import json, re, sqlite3, sys
+sch = json.load(open(sys.argv[3]))
+want = [(c["name"], c["type"]) for c in sch["columns"]]
+db = sqlite3.connect(sys.argv[1])
+bad = []
+table = [(r[1], r[2]) for r in db.execute("PRAGMA table_info(snapshots)")]
+if table != want:
+    bad.append("--schema differs from the table: %s" % sorted(set(table) ^ set(want)))
+if db.execute("PRAGMA user_version").fetchone()[0] != sch["schema_version"]:
+    bad.append("user_version differs from --schema")
+if sch["database"] != sys.argv[1]:
+    bad.append("--schema names %r as the database" % sch["database"])
+doc = re.findall(r"^\| `(\w+)` \| (\w+) \|", open(sys.argv[2], encoding="utf-8").read(), re.M)
+if doc != want:
+    bad.append("docs/history-schema.md differs: %s" % sorted(set(doc) ^ set(want))
+               if set(doc) != set(want) else "docs/history-schema.md lists them in another order")
+print("|".join(bad))
+PY
+)
+if [[ -z $result ]]; then
+  ok "history schema: the table, --schema and docs/history-schema.md agree"
+else
+  bad "history schema: its copies disagree" "${result//|/$'\n        '}"
+fi
+
+# Columns are only ever added, so an older table gains the new ones on the
+# next render, and its rows survive.
+python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute("create table snapshots (id integer primary key, recorded_at text, session_id text)"); d.execute("insert into snapshots (recorded_at, session_id) values (\"2026-01-01T00:00:00Z\", \"old\")"); d.commit()' "$TMP/older.db"
+slsay "$(slpay 2 1)" TS_HISTORY_DB="$TMP/older.db"
+result=$(python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute("pragma user_version").fetchone()[0], d.execute("select count(*), count(cc_cost_usd) from snapshots").fetchone())' "$TMP/older.db")
+if slline_ok && [[ $result == "4 (2, 1)" ]]; then
+  ok "history: an older table gains the new columns and keeps its rows"
+else
+  bad "history: did not bring an older table up to date" "got [$result]"
+fi
+
+# An install from before refreshInterval existed gets it added, and nothing
+# else: the previous statusLine kept at install time is still the person's.
+UCFG="$TMP/sl-upgrade"; mkdir -p "$UCFG/token-save"
+cp "$ROOT/scripts/statusline.sh" "$UCFG/token-save/statusline.sh"
+printf '{"statusLine": {"type": "command", "command": "~/.claude/statusline.sh"}, "source": null}\n' \
+  > "$UCFG/token-save/statusline.previous.json"
+cp "$UCFG/token-save/statusline.previous.json" "$UCFG/prev.orig"
+printf '{\n  "statusLine": {\n    "type": "command",\n    "command": "%s",\n    "padding": 0\n  }\n}\n' \
+  "$UCFG/token-save/statusline.sh" > "$UCFG/settings.json"
+CLAUDE_CONFIG_DIR="$UCFG" "$TS" fixes apply statusline --yes >"$TMP/sl-up.out" 2>&1
+if grep -q '"refreshInterval": 60' "$UCFG/settings.json" \
+   && cmp -s "$UCFG/prev.orig" "$UCFG/token-save/statusline.previous.json" \
+   && [[ $(diff <(printf '{\n  "statusLine": {\n    "type": "command",\n    "command": "%s",\n    "padding": 0\n  }\n}\n' "$UCFG/token-save/statusline.sh") "$UCFG/settings.json" | grep -c '^[<>]') -le 3 ]]; then
+  ok "fix statusline: an older install gains refreshInterval, and keeps the saved original"
+else
+  bad "fix statusline: upgrading an older install went wrong" "$(cat "$TMP/sl-up.out"; cat "$UCFG/settings.json")"
+fi
+
+# ---- the review on #42: segments, columns, quota freshness, import ----------
+# A payload with every field, and a transcript whose newest cache write was to
+# the 1h bucket. $1 session, $2 5h pct, $3 7d pct, $4 extra JSON members.
+V2="$TMP/v2"; mkdir -p "$V2"
+v2tx() { # transcript: $1 = 1h | 5m, $2 = seconds since the last write
+  local f="$V2/tx-$1.jsonl" h=0 m=0
+  [[ $1 == 1h ]] && h=3000 || m=3000
+  printf '%s\n' \
+    '{"type":"user","message":{"role":"user","content":"hi"},"sessionId":"s","timestamp":"2026-10-16T10:00:00Z"}' \
+    "{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"role\":\"assistant\",\"model\":\"claude-opus-5-5\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":10,\"cache_read_input_tokens\":20000,\"cache_creation_input_tokens\":3000,\"cache_creation\":{\"ephemeral_5m_input_tokens\":$m,\"ephemeral_1h_input_tokens\":$h}}},\"sessionId\":\"s\",\"timestamp\":\"2026-10-16T10:00:01Z\"}" \
+    '{"type":"assistant","message":{"id":"m2","role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":5,"output_tokens":10,"cache_read_input_tokens":23000,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}},"sessionId":"s","timestamp":"2026-10-16T10:00:02Z"}' \
+    > "$f"
+  python3 -c 'import os,sys,time; t=time.time()-int(sys.argv[2]); os.utime(sys.argv[1],(t,t))' "$f" "$2"
+  printf '%s' "$f"
+}
+v2pay() {
+  printf '{"session_id":"%s","transcript_path":"%s","session_name":"demo","prompt_id":"p-1",
+  "cwd":"%s/sub","version":"9.9.9","model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},
+  "effort":{"level":"high"},"thinking":{"enabled":true},"fast_mode":false,
+  "output_style":{"name":"default"},"exceeds_200k_tokens":false,
+  "workspace":{"current_dir":"%s","project_dir":"%s","added_dirs":["/x"]},
+  "cost":{"total_cost_usd":1.5,"total_duration_ms":1000},
+  "context_window":{"total_input_tokens":86400,"total_output_tokens":2000,"context_window_size":200000,
+    "used_percentage":43,"remaining_percentage":57,
+    "current_usage":{"input_tokens":4200,"output_tokens":100,"cache_creation_input_tokens":3000,
+                     "cache_read_input_tokens":80000}},
+  "rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},
+                 "seven_day":{"used_percentage":%s,"resets_at":%s}}%s}' \
+    "$1" "${V2TX:-}" "$TMP" "$TMP" "$TMP" "$2" $((slnow + 3600)) "$3" $((slnow + 90000)) "${4:-}"
+}
+v2db() { # db sql -> rows, | between columns
+  python3 -c 'import sqlite3,sys; [print("|".join("" if v is None else str(v) for v in r)) for r in sqlite3.connect(sys.argv[1]).execute(sys.argv[2])]' "$1" "$2"
+}
+
+V2TX=$(v2tx 1h 600)
+slsay "$(v2pay 1a2b3c4d-aaaa 20 100)" TS_HISTORY_DB="$V2/a.db"
+line=$(cat "$TMP/st.out"); missing=""
+for want in "| 1a2b3c4d |" "Opus 5.5 (high) ✻" "ctx 43% free 113.6k" "cache 91%" "msgs 4.2k" \
+            "warm 4" "7d FULL(" "5h 20% used("; do
+  [[ $line == *"$want"* ]] || missing+=" [$want]"
+done
+if [[ -z $missing ]] && slline_ok; then
+  ok "ts statusline: session id, thinking, free context, cache hit, msgs, warmth and FULL"
+else
+  bad "ts statusline: a segment from the review is missing:$missing" "got [$line]"
+fi
+V2TX=$(v2tx 5m 400)
+slsay "$(v2pay 1a2b3c4d-aaaa 20 100)" TS_HISTORY_DB="$V2/w5.db"
+c5=$(cat "$TMP/st.out")
+V2TX=$(v2tx 1h 5)
+slsay "$(v2pay 1a2b3c4d-aaaa 20 100)" TS_HISTORY_DB="$V2/w0.db"
+c0=$(cat "$TMP/st.out")
+if [[ $c5 == *COLD* && $c0 != *warm* && $c0 != *COLD* ]]; then
+  ok "warmth: a 5m write idle past its TTL is COLD, and a session mid-turn shows none"
+else
+  bad "warmth: TTL or idle read wrong" "5m/400s [$c5]  1h/5s [$c0]"
+fi
+
+# Every payload field lands in its own column; a field with no column is
+# listed and only then is the raw payload kept.
+result=$(v2db "$V2/a.db" "select session_name, prompt_id, workspace_current_dir = '$TMP', payload_cwd = '$TMP/sub', added_dirs, thinking_enabled, fast_mode, output_style, ctx_remaining_pct, ctx_input_tokens, ctx_output_tokens, last_input_tokens, last_output_tokens, last_cache_creation_tokens, last_cache_read_tokens, exceeds_200k_tokens, source, unknown_keys, raw_payload from snapshots")
+want='demo|p-1|1|1|["/x"]|1|0|default|57.0|86400|2000|4200|100|3000|80000|0|statusline||'
+if [[ $result == "$want" ]]; then
+  ok "history: every payload field has its own column, cwd and workspace dir kept apart"
+else
+  bad "history: payload fields not recorded as expected" "got  [$result]
+        want [$want]"
+fi
+slsay "$(v2pay 1a2b3c4d-aaaa 20 100 ',"brand_new":{"x":1}')" TS_HISTORY_DB="$V2/a.db"
+result=$(v2db "$V2/a.db" "select unknown_keys, raw_payload like '%brand_new%' from snapshots order by id desc limit 1")
+if [[ $result == '["brand_new.x"]|1' ]]; then
+  ok "history: a field with no column is listed in unknown_keys, with the raw payload"
+else
+  bad "history: the drift canary did not fire" "got [$result]"
+fi
+
+# Quota freshness. A session's first reading has no observation time; a
+# change is an observation; an unchanged reading keeps the time it had.
+QDB="$V2/q.db"
+slsay "$(v2pay aaaaaaaa-1 20 50)" TS_HISTORY_DB="$QDB"
+slsay "$(v2pay aaaaaaaa-1 22 50)" TS_HISTORY_DB="$QDB"
+slsay "$(v2pay aaaaaaaa-1 22 50 ',"prompt_id":"p-2"')" TS_HISTORY_DB="$QDB"
+result=$(v2db "$QDB" "select rate_limits_observed_at is null, rate_limits_observed_at = recorded_at from snapshots where session_id like 'aaaa%' order by id")
+first_obs=$(v2db "$QDB" "select rate_limits_observed_at from snapshots where session_id like 'aaaa%' order by id limit 1 offset 1")
+last_obs=$(v2db "$QDB" "select rate_limits_observed_at from snapshots where session_id like 'aaaa%' order by id desc limit 1")
+if [[ $result == $'1|\n0|1\n0|'* && -n $first_obs && $first_obs == "$last_obs" ]]; then
+  ok "history: rate_limits_observed_at is NULL at first, set on a change, carried while unchanged"
+else
+  bad "history: rate_limits_observed_at is wrong" "got [$result] first [$first_obs] last [$last_obs]"
+fi
+# Session B, idle on an older reading, shows A's (marked ~) and records its own.
+slsay "$(v2pay bbbbbbbb-1 5 40)" TS_HISTORY_DB="$QDB"
+bl=$(cat "$TMP/st.out")
+brow=$(v2db "$QDB" "select five_hour_pct, seven_day_pct from snapshots where session_id like 'bbbb%'")
+lim=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["five_hour"]["used_percentage"], d["five_hour"]["session_id"])' "$V2/limits.json" 2>&1)
+if [[ $bl == *"5h ~22% used("* && $bl == *"7d ~50% used("* && $brow == "5.0|40.0" && $lim == "22 aaaaaaaa-1" ]]; then
+  ok "quota: an idle session shows the fresher reading, marked ~, and records only its own"
+else
+  bad "quota: the cross-session merge is wrong" "line [$bl] row [$brow] limits [$lim]"
+fi
+# The 7d counter reset in place: a drop with the same resets_at, observed
+# later, is believed rather than held at the old maximum.
+sleep 1
+slsay "$(v2pay aaaaaaaa-1 23 1)" TS_HISTORY_DB="$QDB"
+lim=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["seven_day"]["used_percentage"])' "$V2/limits.json" 2>&1)
+slsay "$(v2pay bbbbbbbb-1 5 40)" TS_HISTORY_DB="$QDB"
+if [[ $lim == 1* && $(cat "$TMP/st.out") == *"7d ~1% used("* ]]; then
+  ok "quota: a same-window drop is believed, not held at the old maximum"
+else
+  bad "quota: a reset in place was not believed" "limits 7d [$lim] line [$(cat "$TMP/st.out")]"
+fi
+out=$(env TS_HISTORY_DB="$QDB" "$TS" limits --json 2>&1)
+if [[ $out == *'"tool_version"'* && $out == *'"used_percentage": 23'* && $out == *'"observed_at"'* ]]; then
+  ok "ts limits --json: the freshest reading per window, with when it was observed"
+else
+  bad "ts limits --json did not report the freshest reading" "$out"
+fi
+
+# The ts now reading is cached on the transcript's size and mtime: a render of
+# an unchanged transcript does not read it again.
+V2TX=$(v2tx 1h 300)
+slsay "$(v2pay cccccccc-1 20 50)" TS_HISTORY_DB="$V2/c.db"
+before=$(cat "$TMP/st.out")
+chmod 000 "$V2TX"
+slsay "$(v2pay cccccccc-1 20 50)" TS_HISTORY_DB="$V2/c.db"
+after=$(cat "$TMP/st.out")
+chmod 644 "$V2TX"
+if [[ $before == *"+0/t"* && $after == *"+0/t"* && $after == *"warm "* ]] && slline_ok; then
+  ok "ts statusline: an unchanged transcript is answered from the cache"
+else
+  bad "ts statusline: the cache did not answer for an unchanged transcript" \
+      "before [$before] after [$after]"
+fi
+
+# Import: any offset becomes UTC, rows go through the dedupe, bad lines are
+# reported and skipped, and a second run writes nothing.
+IDB="$V2/import.db"
+cat > "$V2/old.jsonl" <<'JSONL'
+{"recorded_at":"2026-08-14T09:12:03+03:00","payload":{"session_id":"old-1","cost":{"total_cost_usd":0.5},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1755000000}}}}
+{"recorded_at":"2026-08-14T09:13:03+03:00","payload":{"session_id":"old-1","cost":{"total_cost_usd":0.5},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1755000000}}}}
+{"recorded_at":"2026-08-14T06:14:03Z","payload":{"session_id":"old-1","cost":{"total_cost_usd":0.9},"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1755000000}}}}
+{"recorded_at":"2026-08-14T09:15:03","payload":{"session_id":"old-1"}}
+not json
+JSONL
+env TS_HISTORY_DB="$IDB" "$TS" history import "$V2/old.jsonl" >"$TMP/imp1.out" 2>&1; rc1=$?
+env TS_HISTORY_DB="$IDB" "$TS" history import "$V2/old.jsonl" >"$TMP/imp2.out" 2>&1
+rows=$(v2db "$IDB" "select recorded_at, cc_cost_usd, source, rate_limits_observed_at is not null, git_branch is null from snapshots order by recorded_at")
+want=$'2026-08-14T06:12:03Z|0.5|import|0|1\n2026-08-14T06:14:03Z|0.9|import|1|1'
+if [[ $rc1 == 0 && $rows == "$want" ]] && grep -q "no UTC offset" "$TMP/imp1.out" \
+   && grep -q "not JSON" "$TMP/imp1.out" && grep -Eq "rows written +0" "$TMP/imp2.out"; then
+  ok "ts history import: UTC from any offset, deduped, bad lines refused, re-run writes nothing"
+else
+  bad "ts history import went wrong" "rows [$rows] $(grep -E 'written|refused|line' "$TMP/imp1.out" "$TMP/imp2.out")"
+fi
+
+# The second review: fields Claude Code added since (schema 3), warmth from
+# the payload when it states it, and ctx_pct never derived.
+pc() { # $1 warm, $2 seconds until expiry -> a prompt_cache member
+  printf ',"scratchpad_dir":"/tmp/s","prompt_cache":{"warm":%s,"caching_observed":true,"ttl":"5m","expires_at":%s,
+  "requests":12,"misses":1,"expected_rebuilds":0,"hit_ratio":0.97,"cache_write_tokens":3000,
+  "miss_recache_tokens":500,"last_miss_at":%s,"recache_tokens_if_cold":90000,
+  "miss_causes":{"ttl_expired_1h":1},"last_miss_cause":{"causes":["ttl"]}}' \
+    "$1" $((slnow + $2)) $((slnow - 100))
+}
+repo=',"workspace":{"current_dir":"'"$TMP"'","project_dir":"'"$TMP"'","added_dirs":[],"repo":{"host":"github.com","owner":"o","name":"n"}}'
+V2TX=$(v2tx 1h 5)
+slsay "$(v2pay dddddddd-1 20 50 "$(pc true 600)$repo")" TS_HISTORY_DB="$V2/s3.db"
+l3=$(cat "$TMP/st.out")
+r3=$(v2db "$V2/s3.db" "select scratchpad_dir, repo_host, repo_owner, repo_name, prompt_cache_warm, prompt_cache_caching_observed, prompt_cache_ttl, prompt_cache_expires_at = $((slnow + 600)), prompt_cache_requests, prompt_cache_misses, prompt_cache_expected_rebuilds, prompt_cache_hit_ratio, prompt_cache_write_tokens, prompt_cache_miss_recache_tokens, prompt_cache_last_miss_at = $((slnow - 100)), prompt_cache_recache_tokens_if_cold, prompt_cache_miss_causes, prompt_cache_last_miss_cause, unknown_keys, raw_payload from snapshots")
+want='/tmp/s|github.com|o|n|1|1|5m|1|12|1|0|0.97|3000|500|1|90000|{"ttl_expired_1h": 1}|{"causes": ["ttl"]}||'
+if [[ $r3 == "$want" ]]; then
+  ok "history: prompt_cache, repo and scratchpad fields have columns, and trip no canary"
+else
+  bad "history: schema 3 fields not recorded as expected" "got  [$r3]
+        want [$want]"
+fi
+# The transcript says 1h and was written 5s ago, which alone would show
+# nothing; the payload says 5m, expiring in 10 minutes.
+if [[ $l3 == *"warm 10m"* || $l3 == *"warm 9m"* ]]; then
+  ok "warmth: prompt_cache.expires_at is preferred over the transcript tail"
+else
+  bad "warmth: the payload's prompt_cache was not used" "got [$l3]"
+fi
+slsay "$(v2pay dddddddd-1 20 50 "$(pc false 600)")" TS_HISTORY_DB="$V2/s3b.db"
+if [[ $(cat "$TMP/st.out") == *COLD* ]]; then
+  ok "warmth: prompt_cache.warm false is COLD whatever expires_at says"
+else
+  bad "warmth: warm=false was not shown as COLD" "got [$(cat "$TMP/st.out")]"
+fi
+# A field of the wrong type is drift, not a silent NULL.
+slsay "$(v2pay dddddddd-2 20 50 ',"scratchpad_dir":42')" TS_HISTORY_DB="$V2/s3c.db"
+r=$(v2db "$V2/s3c.db" "select scratchpad_dir is null, unknown_keys, raw_payload is not null from snapshots")
+if [[ $r == '1|["scratchpad_dir"]|1' ]]; then
+  ok "history: a field of the wrong type is listed in unknown_keys"
+else
+  bad "history: type drift was not reported" "got [$r]"
+fi
+# First render: used_percentage null with 0 tokens is not a measured 0%.
+printf '{"session_id":"eeeeeeee-1","model":{"display_name":"Opus 5.5"},"context_window":{"used_percentage":null,"total_input_tokens":0,"total_output_tokens":0,"context_window_size":200000}}' \
+  > "$V2/first.json"
+slsay "$(cat "$V2/first.json")" TS_HISTORY_DB="$V2/s3d.db"
+r=$(v2db "$V2/s3d.db" "select ctx_pct is null, ctx_tokens from snapshots")
+if [[ $r == "1|0" ]] && slline_ok; then
+  ok "history: ctx_pct is NULL when the payload reports none, never a derived 0"
+else
+  bad "history: ctx_pct was derived" "got [$r]"
+fi
+
+# The third review: the fields only some sessions carry (schema 4), and the
+# shapes of a normal first render, which are not drift.
+printf '{"session_id":"ffffffff-1","model":{"display_name":"Opus 5.5"},"agent_type":"Explore",
+  "context_window":{"used_percentage":null,"total_input_tokens":0,"current_usage":null},
+  "workspace":{"current_dir":"/w","git_worktree":"feat"},"vim":{"mode":"INSERT"},"agent":{"name":"rev"},
+  "pr":{"number":42,"url":"https://h/o/n/pull/42","review_state":"pending","kind":"mr"},
+  "worktree":{"name":"f","path":"/w","branch":"wt-f","original_cwd":"/o","original_branch":"main"},
+  "rate_limits":{"spend_limit":{"used_percentage":62.8,"resets_at":1740787200,"used_usd":314.12,"limit_usd":500,"period":"monthly"}}}' \
+  > "$V2/s4.json"
+slsay "$(cat "$V2/s4.json")" TS_HISTORY_DB="$V2/s4.db"
+r=$(v2db "$V2/s4.db" "select git_worktree, worktree_name, worktree_path, worktree_branch, worktree_original_cwd, worktree_original_branch, pr_number, pr_url, pr_review_state, pr_kind, agent_name, agent_type, spend_limit_pct, spend_limit_resets_at, spend_limit_used_usd, spend_limit_limit_usd, spend_limit_period, last_input_tokens is null, unknown_keys, raw_payload from snapshots")
+want='feat|f|/w|wt-f|/o|main|42|https://h/o/n/pull/42|pending|mr|rev|Explore|62.8|1740787200|314.12|500.0|monthly|1||'
+if [[ $r == "$want" ]] && slline_ok; then
+  ok "history: worktree, pr, agent and spend_limit have columns; current_usage null and vim.mode trip no canary"
+else
+  bad "history: schema 4 fields not recorded as expected" "got  [$r]
+        want [$want]"
+fi
+# null stands for an empty object; a value of another type there is drift.
+slsay '{"session_id":"ffffffff-2","model":{"display_name":"Opus 5.5"},"pr":"#42"}' TS_HISTORY_DB="$V2/s4b.db"
+r=$(v2db "$V2/s4b.db" "select unknown_keys from snapshots")
+if [[ $r == '["pr"]' ]]; then
+  ok "history: a scalar where a known object belongs is listed in unknown_keys"
+else
+  bad "history: a known object of the wrong type was not reported" "got [$r]"
 fi
 
 # ---------------------------------------------------------------------------

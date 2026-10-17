@@ -477,9 +477,231 @@ def toolsearch_revert():
         return False, res
     return True, "removed env.ENABLE_TOOL_SEARCH from %s" % path
 
+# ---------------------------------------------------------------------------
+# statusline: install token-save's statusline, which records the history
+# ---------------------------------------------------------------------------
+
+# The wrapper is copied into token-save's own directory, next to the history,
+# not to ~/.claude/statusline.sh: that name is the one people already use for
+# their own line, and an installer that overwrites it has lost something no
+# revert can bring back. The statusLine setting it replaces is kept beside it,
+# as the exact text it had in settings.json, so revert puts back those bytes.
+
+_PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))
+STATUSLINE_SRC = os.path.join(_PLUGIN_ROOT, "scripts", "statusline.sh")
+
+# Without a refresh interval the line runs only on events, so an idle
+# session's cache warmth and quota never move. A setting someone has already
+# given it is theirs, and is left as it is.
+SL_REFRESH_S = 60
+
+
+def _sl_dir() -> str:
+    return os.path.join(CLAUDE_HOME, "token-save")
+
+
+def _sl_wrapper() -> str:
+    return os.path.join(_sl_dir(), "statusline.sh")
+
+
+def _sl_saved() -> str:
+    return os.path.join(_sl_dir(), "statusline.previous.json")
+
+
+def _sl_command() -> str:
+    """The command as written into settings.json: ~-relative where it can be,
+    so the file reads the same on every machine with a default config dir."""
+    import shlex
+    path = _sl_wrapper()
+    home = os.path.expanduser("~")
+    short = "~" + path[len(home):] if path.startswith(home + os.sep) else path
+    return short if shlex.quote(short.lstrip("~")) == short.lstrip("~") \
+        else shlex.quote(path)
+
+
+def _sl_is_ours(value) -> bool:
+    cmd = value.get("command") if isinstance(value, dict) else None
+    return isinstance(cmd, str) and (
+        cmd.strip() == _sl_command()
+        or os.path.expanduser(cmd.strip()) == _sl_wrapper())
+
+
+def _sl_fresh() -> bool:
+    try:
+        with open(STATUSLINE_SRC, "rb") as a, open(_sl_wrapper(), "rb") as b:
+            return a.read() == b.read()
+    except OSError:
+        return False
+
+
+def _sl_value_src(indent, unit: str, nl: str) -> str:
+    pairs = [("type", '"command"'), ("command", json.dumps(_sl_command())),
+             ("padding", "0"), ("refreshInterval", str(SL_REFRESH_S))]
+    if indent is None:
+        return "{%s}" % ", ".join('"%s": %s' % kv for kv in pairs)
+    inner = indent + unit
+    return "{" + nl + ("," + nl).join(
+        '%s"%s": %s' % (inner, k, v) for k, v in pairs) + nl + indent + "}"
+
+
+def _sl_plugin_note() -> str:
+    """Why the line could come out empty after installing: the wrapper runs
+    the newest token-save in the plugin cache, and there may be none."""
+    cache = os.path.join(CLAUDE_HOME, "plugins", "cache")
+    import glob
+    if os.environ.get("TS_BIN") or glob.glob(
+            os.path.join(cache, "*", "token-save", "*", "scripts", "ts")):
+        return ""
+    return ("note: no token-save plugin is installed under %s, and the line "
+            "runs the newest one there -- install the plugin, or set TS_BIN "
+            "in settings.json's env block" % cache)
+
+
+def statusline_show():
+    path = _settings_path()
+    data, ok, err = _load_settings(path)
+    info = {"id": "statusline", "target": path, "applied": False,
+            "exists": os.path.isfile(path), "diff": "",
+            "why": ("Shows directory, branch, model, context, cost and the 5h "
+                    "and 7d quota, and records each change into %s. The quota "
+                    "and Claude Code's cost figure are kept nowhere else once "
+                    "a session ends." % os.path.join(_sl_dir(), "history.db"))}
+    if not ok:
+        info["blocked"] = ("settings.json does not parse (%s) — a byte-order "
+                           "mark is handled, so this is a real syntax error" % err)
+        return info
+    if not isinstance(data, dict):
+        info["blocked"] = "settings.json is not a JSON object"
+        return info
+    if not os.path.isfile(STATUSLINE_SRC):
+        info["blocked"] = "this copy of token-save has no %s" % STATUSLINE_SRC
+        return info
+    cur = data.get("statusLine")
+    wired, fresh = _sl_is_ours(cur), _sl_fresh()
+    refresh = wired and "refreshInterval" in cur
+    info["applied"] = wired and fresh and refresh
+    lines = []
+    if wired and not refresh:
+        lines.append("  statusLine.refreshInterval: (unset) -> %d" % SL_REFRESH_S)
+    if not fresh:
+        lines.append("  %s %s" % ("update" if os.path.isfile(_sl_wrapper())
+                                  else "copy  ", _sl_wrapper()))
+    if not wired:
+        lines.append("  statusLine: %s -> %s" % (
+            json.dumps(cur, ensure_ascii=False) if cur is not None else "(unset)",
+            _sl_value_src(None, "", "\n")))
+        if cur is not None:
+            lines.append("  your current statusLine is kept in %s, and "
+                         "`ts fixes revert statusline` puts it back" % _sl_saved())
+    note = _sl_plugin_note()
+    if lines and note:
+        lines.append("  " + note)
+    info["diff"] = "\n".join(lines)
+    return info
+
+
+def statusline_apply():
+    path = _settings_path()
+    bom, raw = _split_bom(_read(path) if os.path.isfile(path) else "")
+    data, ok, err = _load_settings(path)
+    if not ok:
+        return False, ("settings.json does not parse (%s) — refusing to "
+                       "overwrite it" % err)
+    if not isinstance(data, dict):
+        return False, "settings.json is not a JSON object — refusing to touch it"
+    if not os.path.isfile(STATUSLINE_SRC):
+        return False, "this copy of token-save has no %s" % STATUSLINE_SRC
+    cur = data.get("statusLine")
+    wired, fresh = _sl_is_ours(cur), _sl_fresh()
+    refresh = wired and "refreshInterval" in cur
+    if wired and fresh and refresh:
+        return False, "already applied"
+
+    unit = _indent_unit(raw) if raw.strip() else "  "
+    nl = _newline(raw)
+    top = _skip_ws(raw, 0)
+    rec = _find(raw, top, "statusLine") if raw.strip() else None
+
+    wrapper = _sl_wrapper()
+    try:
+        os.makedirs(_sl_dir(), mode=0o700, exist_ok=True)
+        if not wired:
+            # Only when the setting is not already ours: re-applying to
+            # refresh the wrapper must not replace the person's original with
+            # our own entry.
+            _write(_sl_saved(), json.dumps(
+                {"statusLine": cur,
+                 "source": raw[rec[2]:rec[3]] if rec else None},
+                ensure_ascii=False, indent=2) + "\n")
+        if not fresh:
+            # Through a temporary name, so a render mid-copy never runs half
+            # a script.
+            tmp = wrapper + ".tmp"
+            shutil.copyfile(STATUSLINE_SRC, tmp)
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, wrapper)
+    except OSError as exc:
+        return False, _write_error(wrapper, exc)
+    if wired and refresh:
+        return True, "updated %s" % wrapper
+
+    if wired:
+        # Installed before refreshInterval was: add it, touch nothing else.
+        new = _insert_member(raw, rec[2], "refreshInterval", str(SL_REFRESH_S), nl)
+    elif not raw.strip():
+        new = "{%s%s\"statusLine\": %s%s}%s" % (
+            nl, unit, _sl_value_src(unit, unit, nl), nl, nl)
+    elif rec is None:
+        new = _insert_member(raw, top, "statusLine",
+                             _sl_value_src(_member_indent(raw, top), unit, nl), nl)
+    else:
+        new = raw[:rec[2]] + _sl_value_src(_line_indent(raw, rec[1]), unit, nl) \
+            + raw[rec[3]:]
+    ok, res = _backup_and_write(path, bom + new)
+    if not ok:
+        return False, res
+    return True, "statusLine runs %s, set in %s%s" % (
+        wrapper, path, " (backup: %s)" % res if res else "")
+
+
+def statusline_revert():
+    path = _settings_path()
+    bom, raw = _split_bom(_read(path) if os.path.isfile(path) else "")
+    data, ok, err = _load_settings(path)
+    if not ok:
+        return False, "settings.json does not parse (%s)" % err
+    if not isinstance(data, dict) or not _sl_is_ours(data.get("statusLine")):
+        # Changed since apply, perhaps by hand: theirs now, not ours to undo.
+        return False, "not applied"
+    try:
+        with open(_sl_saved(), "rb") as fh:
+            saved = json.loads(fh.read().decode("utf-8"))
+    except (OSError, ValueError):
+        saved = {}
+    source = saved.get("source") if isinstance(saved, dict) else None
+    top = _skip_ws(raw, 0)
+    if isinstance(source, str):
+        rec = _find(raw, top, "statusLine")
+        new = raw[:rec[2]] + source + raw[rec[3]:]
+    else:
+        new = _remove_member(raw, top, "statusLine")
+    ok, res = _backup_and_write(path, bom + new)
+    if not ok:
+        return False, res
+    for leftover in (_sl_wrapper(), _sl_saved()):
+        try:
+            os.remove(leftover)
+        except OSError:
+            pass
+    return True, "%s statusLine in %s; the history in %s is kept" % (
+        "restored the previous" if isinstance(source, str) else "removed",
+        path, _sl_dir())
+
 FIXES = {
     "terse-output": (terse_show, terse_apply, terse_revert),
     "tool-search": (toolsearch_show, toolsearch_apply, toolsearch_revert),
+    "statusline": (statusline_show, statusline_apply, statusline_revert),
 }
 
 
