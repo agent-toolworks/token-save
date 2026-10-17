@@ -1,5 +1,5 @@
 {
-  "contract": 2,
+  "contract": 3,
   "name": "token-save",
   "title": "token-save",
   "version": "0.27.1",
@@ -9,6 +9,8 @@
     {"id": "cost-today", "kind": "stat", "title": "Estimated cost today"},
     {"id": "five-hour", "kind": "stat", "title": "5-hour quota"},
     {"id": "seven-day", "kind": "stat", "title": "7-day quota"},
+    {"id": "quota-history", "kind": "timeseries", "title": "5-hour and 7-day quota over time",
+     "ranges": ["6h", "12h", "24h", "3d", "7d", "14d", "30d"]},
     {"id": "cost", "kind": "timeseries", "title": "Estimated cost per day, last 30 days"},
     {"id": "sessions", "kind": "table", "title": "Recent sessions"},
     {"id": "projects", "kind": "table", "title": "Cost by project, last 30 days"}
