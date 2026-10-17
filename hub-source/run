@@ -3,8 +3,9 @@
 
 The hub finds this folder inside the installed plugin and runs `run detect`,
 `run fetch <widget>` and `run show session <id>`, each printing JSON in the
-shapes its source contract (version 2) defines. Version 2 is what lets a
-quota say when it resets (resets_at), which the hub counts down to.
+shapes its source contract (version 3) defines. Version 2 is what lets a
+quota say when it resets (resets_at), which the hub counts down to; version
+3 lets the quota-history chart offer its time ranges (6h to 30d) as buttons.
 
 It reads the history the statusline records exactly as docs/history-schema.md
 tells a reader to: found by history.db_path(), the writer's own lookup;
@@ -225,7 +226,52 @@ def show_session(db, sid):
     ]})
 
 
-WIDGETS = {"cost-today": cost_today, "cost": cost_per_day, "sessions": sessions, "projects": projects}
+BUCKET = 600         # seconds: one quota-history point per 10 minutes
+GAP = 3600           # seconds without a reading that break the line
+HISTORY_DAYS = 30    # the longest range the hub offers
+
+
+def quota_history(db):
+    """The 5-hour and 7-day quota over the last 30 days, one chart.
+
+    From observed readings only (rate_limits_observed_at set), true as of that
+    time, as docs/history-schema.md says: an idle session keeps writing an old
+    reading, which only rows with a fresh observation leave out. The quota is
+    the account's, so sessions are not added together; each 10-minute bucket
+    takes the highest reading seen in it (a window can reset inside one). An
+    hour with no reading breaks the line rather than drawing across it.
+    """
+    since = utc(datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS))
+    rows = db.execute("SELECT rate_limits_observed_at AS t, five_hour_pct, seven_day_pct FROM snapshots "
+                      "WHERE rate_limits_observed_at >= ? ORDER BY rate_limits_observed_at", (since,)).fetchall()
+    buckets = {}
+    for r in rows:
+        try:
+            ts = datetime.fromisoformat(r["t"].replace("Z", "+00:00")).timestamp()
+        except (AttributeError, ValueError):
+            continue
+        b = buckets.setdefault(int(ts // BUCKET) * BUCKET, [None, None])
+        for i, v in enumerate((r["five_hour_pct"], r["seven_day_pct"])):
+            if v is not None and (b[i] is None or v > b[i]):
+                b[i] = v
+    series = [{"name": "5h", "points": []}, {"name": "7d", "points": []}]
+    previous = None
+    for start in sorted(buckets):
+        t = utc(datetime.fromtimestamp(start, timezone.utc))
+        for i, s in enumerate(series):
+            if previous is not None and start - previous > GAP:
+                s["points"].append({"t": utc(datetime.fromtimestamp(previous + BUCKET, timezone.utc)), "v": None})
+            v = buckets[start][i]
+            s["points"].append({"t": t, "v": None if v is None else round(v, 1)})
+        previous = start
+    result = {"kind": "timeseries", "data": {"unit": "%", "series": series}}
+    if rows:
+        result["as_of"] = rows[-1]["t"]
+    out(result)
+
+
+WIDGETS = {"cost-today": cost_today, "cost": cost_per_day, "sessions": sessions, "projects": projects,
+           "quota-history": quota_history}
 
 
 def main(argv):

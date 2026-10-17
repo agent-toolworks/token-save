@@ -3856,6 +3856,36 @@ HSBUILD
 [[ -z $hsbuild ]] || bad "hub source: the fixture history could not be built" "$hsbuild"
 
 hsrun() { TS_HISTORY_DB="$HSD/history.db" "$@"; }  # "$@" may be a function
+# quota-history reads a history of its own: D two hours back (a gap before the
+# recent readings), A and B within the last minutes, E 31 days back (outside
+# the 30 days), and F with a reading it never observed, which is left out.
+mkdir -p "$HSD/q"
+hsq=$(python3 - "$ROOT/scripts/lib" "$HSD/q" <<'HSQ'
+import os, sqlite3, sys
+from datetime import datetime, timedelta, timezone
+sys.path.insert(0, sys.argv[1])
+import history
+db = os.path.join(sys.argv[2], "history.db")
+now = datetime.now(timezone.utc).replace(microsecond=0)
+at = lambda minutes: (now - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+sid = lambda c: c * 8 + "-1111-4222-8333-444444444444"
+readings = [("d", 125, 10, 5, True), ("d", 123, 12, 5, True), ("e", 31 * 24 * 60, 50, 50, True),
+            ("a", 3, 20, 8, True), ("a", 2, 22, 8, True), ("b", 1, 23.4, 9, True), ("f", 4, 99, 99, False)]
+for n, (c, minutes, *_) in enumerate(readings):  # a cost of its own each, or record() skips a repeat
+    r = history.record(history.row_from_payload({"session_id": sid(c), "cost": {"total_cost_usd": 0.01 * (n + 1)}},
+                                                recorded_at=at(minutes)), db)
+    if r != "written":
+        print("record: %s" % r)
+con = sqlite3.connect(db)
+for c, minutes, five, seven, observed in readings:
+    con.execute("UPDATE snapshots SET five_hour_pct = ?, seven_day_pct = ?, rate_limits_observed_at = ? "
+                "WHERE session_id = ? AND recorded_at = ?", (five, seven, at(minutes) if observed else None, sid(c), at(minutes)))
+con.commit()
+con.close()
+HSQ
+)
+[[ -z $hsq ]] || bad "hub source: the quota-history fixture could not be built" "$hsq"
+TS_HISTORY_DB="$HSD/q/history.db" bounded 20 "$HS" fetch quota-history > "$HSD/quota-history.json" 2> "$HSD/quota-history.err"
 for w in cost-today cost five-hour seven-day sessions projects; do
   hsrun bounded 20 "$HS" fetch $w > "$HSD/$w.json" 2> "$HSD/$w.err"
 done
@@ -3892,6 +3922,18 @@ got_reset = f.get("data", {}).get("resets_at", "")
 check(got_reset.endswith("Z") and datetime.fromisoformat(got_reset.replace("Z", "+00:00")).timestamp() == want_reset,
       "the 5-hour quota says when it resets, as a time the hub can count down to (resets_at)",
       "five-hour resets_at %r, limits.json %r" % (got_reset, want_reset))
+q = load("quota-history.json")
+qs = {s["name"]: s["points"] for s in q.get("data", {}).get("series", [])}
+vals5 = [p["v"] for p in qs.get("5h", []) if p["v"] is not None]
+oldest = min((p["t"] for p in qs.get("5h", [])), default="")
+month_ago = (datetime.now(timezone.utc) - __import__("datetime").timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+check(list(qs) == ["5h", "7d"] and q["data"].get("unit") == "%" and vals5 and vals5[-1] == 23.4
+      and 99 not in vals5 and 50 not in vals5 and oldest >= month_ago,
+      "quota history: 5h and 7d on one chart, observed readings only, the last 30 days",
+      "quota-history: %s" % q)
+check(any(p["v"] is None for p in qs.get("5h", [])) and max(vals5) == 23.4 and 12 in vals5,
+      "quota history: a two-hour gap breaks the line, and a bucket keeps its highest reading",
+      "quota-history 5h points: %s" % qs.get("5h"))
 v = load("seven-day.json")
 check(v.get("data", {}).get("value") == "—" and "reset" in v["data"].get("label", ""),
       "a quota window whose resets_at has passed shows no number",
