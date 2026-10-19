@@ -3318,10 +3318,11 @@ slline_ok() {
 slsay "$(slpay 1.2345 5000)"
 line=$(cat "$TMP/st.out")
 missing=""
-for want in "Opus 5.5 (high)" "ctx 21% free 160.0k" "/t" "\$1.23" "5h 23% used(2h1" \
+for want in "Opus 5.5 (high)" "ctx 21% free 160.0k" "/t" "5h 23% used(2h1" \
             "7d 9% used(3d11h)" "/${TMP##*/}"; do
   [[ $line == *"$want"* ]] || missing+=" [$want]"
 done
+[[ $line == *'$'* ]] && missing+=" [no cost: the history keeps it, the line does not show it]"
 if [[ -z $missing && ! -s $TMP/st.err && $(cat "$TMP/st.rc") == 0 ]]; then
   ok "ts statusline: a full payload renders every segment"
 else
@@ -3886,7 +3887,7 @@ HSQ
 )
 [[ -z $hsq ]] || bad "hub source: the quota-history fixture could not be built" "$hsq"
 TS_HISTORY_DB="$HSD/q/history.db" bounded 20 "$HS" fetch quota-history > "$HSD/quota-history.json" 2> "$HSD/quota-history.err"
-for w in cost-today cost five-hour seven-day sessions projects; do
+for w in five-hour seven-day sessions projects; do
   hsrun bounded 20 "$HS" fetch $w > "$HSD/$w.json" 2> "$HSD/$w.err"
 done
 hsrun bounded 20 "$HS" show session aaaaaaaa-1111-4222-8333-444444444444 > "$HSD/show.json" 2> "$HSD/show.err"
@@ -3903,16 +3904,6 @@ def load(n):
 res = []
 def check(ok, good, bad):
     res.append(("ok " if ok else "bad ") + (good if ok else bad))
-t = load("cost-today.json")
-check(t.get("data", {}).get("value") == 3.35 and t["data"]["label"].startswith("3 session(s)"),
-      "cost today is each session's latest total, summed: 1.25 + 2.00 + 0.10, not C's 9.00",
-      "cost today: %s" % t)
-s = load("cost.json")
-pts = s.get("data", {}).get("series", [{}])[0].get("points", [])
-today = datetime.now(timezone.utc).date().isoformat()
-check(len(pts) == 30 and pts[-1] == {"t": today + "T00:00:00Z", "v": 3.35} and sum(p["v"] for p in pts) == 3.35,
-      "cost per day: 30 days, every day present, today at 3.35, C outside the window",
-      "cost per day: %s" % pts[-3:])
 f = load("five-hour.json")
 check(f.get("data", {}).get("value") == 23 and f["data"].get("unit") == "%" and "as_of" in f,
       "the 5-hour quota comes from limits.json, with when it was observed",
@@ -3941,21 +3932,20 @@ check(v.get("data", {}).get("value") == "—" and "reset" in v["data"].get("labe
 rows = load("sessions.json").get("data", {}).get("rows", [])
 check([r["session"]["id"] if isinstance(r["session"], dict) else r["session"] for r in rows[:2]]
       == ["bbbbbbbb-1111-4222-8333-444444444444", "aaaaaaaa-1111-4222-8333-444444444444"]
-      and rows[1]["cost"] == 1.25 and rows[1]["lines"] == "+10 −2",
+      and "cost" not in rows[1] and rows[1]["lines"] == "+10 −2",
       "recent sessions: newest first, a session's figures from its latest row",
       "sessions: %s" % rows[:2])
 imp = [r for r in rows if r["session"] == "import-1"]
 check(len(imp) == 1, "a session id that is not Claude Code's stays plain text, not a link",
       "import-1 row: %s" % [r["session"] for r in rows])
 p = load("projects.json").get("data", {}).get("rows", [])
-check([(r["project"], r["cost"]) for r in p] == [("/w/lib", 2.0), ("/w/app", 1.25), ("/w/imp", 0.1)],
-      "cost by project, last 30 days, most expensive first", "projects: %s" % p)
+check([(r["project"], r["sessions"]) for r in p] == [("/w/app", 1), ("/w/imp", 1), ("/w/lib", 1)]
+      and all("cost" not in r for r in p),
+      "sessions by project, last 30 days, with no cost", "projects: %s" % p)
 w = {x["id"]: x for x in load("show.json").get("widgets", [])}
 items = {i["text"]: i["detail"] for i in w.get("details", {}).get("data", {}).get("items", [])}
-check(w.get("cost", {}).get("data", {}).get("value") == 1.25
-      and len(w.get("cost-over-time", {}).get("data", {}).get("series", [{}])[0].get("points", [])) == 2
-      and items.get("Model") == "Opus 5.5 (high)",
-      "show session: its total, its cost over time, and its model", "show: %s" % w)
+check(list(w) == ["details"] and items.get("Model") == "Opus 5.5 (high)",
+      "show session: its details and model, no cost", "show: %s" % w)
 check(load("show-none.json") == {"widgets": []}, "show for a session it never recorded is empty",
       "show unknown: %s" % load("show-none.json"))
 print("\n".join(res))

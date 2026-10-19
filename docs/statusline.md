@@ -5,7 +5,7 @@ history of what that line showed, one row per change for each session, so you
 can look back at usage once the session and its transcript are gone.
 
 ```
-~/git/…/repo main | 1a2b3c4d | Opus 5.5 (high) ✻ | ctx 43% free 113.6k | cache 97% msgs 4.2k warm 48m | 423.0K +530/t clear>1t | $1.23 | 5h 23% used(2h14m) · 7d ~9% used(3d11h)
+~/git/…/repo main | 1a2b3c4d | Opus 5.5 (high) ✻ | ctx 43% free 113.6k | cache 97% msgs 4.2k warm 48m | 423.0K +530/t clear>1t | 5h 23% used(2h14m) · 7d ~9% used(3d11h)
 ```
 
 | Segment | What it is | Source |
@@ -18,7 +18,6 @@ can look back at usage once the session and its transcript are gone.
 | `msgs 4.2k` | the last request's uncached input | payload |
 | `warm 48m` / `COLD` | how long the session can sit idle before its cached prefix expires and the next turn pays a cache write. It comes from the payload's `prompt_cache` (`expires_at`, `ttl`, `warm`) when Claude Code sends it. Older versions do not, and then the TTL (1h or 5m) is read from the newest cache write in the transcript, not assumed, and the countdown runs from the transcript's age, hidden for the first minute idle (mid-turn). Yellow in the last quarter of the TTL | payload, or transcript |
 | `423.0K +530/t clear>1t` | the `ts now` reading: context, growth per turn, and how soon clearing would pay for itself (shown only when it is soon) | transcript |
-| `$1.23` | session cost so far, **as Claude Code estimates it** | payload |
 | `5h 23% used(2h14m)` · `7d ~9% used(3d11h)` | how much of the 5-hour and 7-day quota is used (`FULL` at 100%), and when each resets. A dim `~` means the reading is another session's, because it is fresher than this one's (below) | payload, `limits.json` |
 
 **Why the quota can be another session's.** `rate_limits` in the payload comes
