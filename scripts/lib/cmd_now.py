@@ -185,6 +185,12 @@ def render(a: dict) -> str:
     return "\n".join(out)
 
 
+def render_context(a: dict) -> str:
+    """The context alone, coloured by its band: the full statusline's segment."""
+    colour, _ = _band(a)
+    return colour(human(a["context"]))
+
+
 def render_statusline(a: dict) -> str:
     """One compact line for statusline.sh. No newline, minimal width."""
     ctx = human(a["context"])

@@ -5,7 +5,7 @@ Claude Code runs the statusline command when the session changes (and every
 `refreshInterval` seconds when that is set) and hands it the session JSON on
 stdin. This prints one line from it:
 
-    ~/git/…/repo main | 1a2b3c4d | Opus 5.5 (high) ✻ | ctx 21% free 158.0k | cache 97% msgs 4.2k warm 48m | 423.0K +530/t clear>1t | 5h 23% used(2h14m) · 7d ~9% used(3d11h)
+    ~/git/…/repo main | 1a2b3c4d | Opus 5.5 (high) ✻ | ctx 21% free 158.0k | cache 97% msgs 4.2k warm 48m | 423.0K | 5h 23% used(2h14m) · 7d ~9% used(3d11h)
 
 and records what it printed into the history database (history.py), because
 the quota, Claude Code's cost figure and the context percentage reach nothing
@@ -444,7 +444,7 @@ def render(row: dict, now: dict, warm=None, quota: dict = None) -> str:
         parts.append(req)
     if now:
         import cmd_now
-        parts.append(cmd_now.render_statusline(now))
+        parts.append(cmd_now.render_context(now))
     if quota is None:
         quota = {w: (row[w + "_pct"], row[w + "_resets_at"], False)
                  for w, _ in limits.WINDOWS}
