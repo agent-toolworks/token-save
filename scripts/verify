@@ -3323,7 +3323,7 @@ for want in "Opus 5.5 (high)" "ctx 21% free 160.0k" "5h 23% used(2h1" \
   [[ $line == *"$want"* ]] || missing+=" [$want]"
 done
 [[ $line == *'$'* ]] && missing+=" [no cost: the history keeps it, the line does not show it]"
-[[ $line =~ \+[0-9.]+[kKM]?/t || $line == *"clear>"* ]] && missing+=" [no growth per turn or clear hint: ts now has them]"
+[[ $line =~ \+[0-9.]+[kKM]?/t || $line == *"clear>"* || $line =~ \|\ [0-9.]+K\ \| ]] && missing+=" [no ts now segment: ctx says the size, ts now the rest]"
 if [[ -z $missing && ! -s $TMP/st.err && $(cat "$TMP/st.rc") == 0 ]]; then
   ok "ts statusline: a full payload renders every segment"
 else
@@ -3704,7 +3704,7 @@ chmod 000 "$V2TX"
 slsay "$(v2pay cccccccc-1 20 50)" TS_HISTORY_DB="$V2/c.db"
 after=$(cat "$TMP/st.out")
 chmod 644 "$V2TX"
-if [[ $before == *"| 23.0K |"* && $after == *"| 23.0K |"* && $after == *"warm "* ]] && slline_ok; then
+if [[ $before == *"warm "* && $after == "$before" ]] && slline_ok; then
   ok "ts statusline: an unchanged transcript is answered from the cache"
 else
   bad "ts statusline: the cache did not answer for an unchanged transcript" \
