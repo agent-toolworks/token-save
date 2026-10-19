@@ -350,9 +350,10 @@ newest.
 ## In toolworks-hub
 
 [toolworks-hub](https://github.com/agent-toolworks/toolworks-hub) shows this
-plugin's numbers on a local page: today's estimated cost, the 5-hour and 7-day
-quota, cost per day and by project over 30 days, recent sessions, and a
-section on each session's page. It finds `hub-source/` inside the installed
+plugin's numbers on a local page: the 5-hour and 7-day quota and their
+history, recent sessions, sessions by project over 30 days, and a section on
+each session's page. The history records Claude Code's cost estimate, but
+neither the hub nor the statusline shows it. It finds `hub-source/` inside the installed
 plugin and runs it; nothing needs configuring.
 
 `hub-source/run` reads the history the way

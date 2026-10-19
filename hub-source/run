@@ -41,12 +41,12 @@ UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 LATEST = """
 WITH ranked AS (
-  SELECT session_id, recorded_at, cc_cost_usd, project_dir, model_name,
+  SELECT session_id, recorded_at, project_dir, model_name,
          lines_added, lines_removed,
          row_number() OVER (PARTITION BY session_id ORDER BY recorded_at DESC, id DESC) AS n,
          min(recorded_at) OVER (PARTITION BY session_id) AS started
   FROM snapshots)
-SELECT session_id, recorded_at, cc_cost_usd, project_dir, model_name,
+SELECT session_id, recorded_at, project_dir, model_name,
        lines_added, lines_removed, started
 FROM ranked WHERE n = 1
 """
@@ -85,10 +85,6 @@ def session_cell(sid):
     return {"ref": "session", "id": sid, "label": sid[:8]} if UUID.match(sid or "") else sid
 
 
-def money(v):
-    return round(v, 2) if v is not None else None
-
-
 def detect():
     path = history.db_path()
     if path is None:
@@ -113,28 +109,6 @@ def detect():
         return out({"state": "stale", "reason": stale[0], "tool_version": ver,
                     "fix": "claude plugin update token-save, then restart Claude Code"})
     out({"state": "working", "tool_version": ver})
-
-
-def cost_today(db):
-    midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-    rows = db.execute("SELECT cc_cost_usd FROM (%s) WHERE started >= ?" % LATEST, (utc(midnight),)).fetchall()
-    total = sum(r["cc_cost_usd"] or 0 for r in rows)
-    out({"kind": "stat", "data": {
-        "value": round(total, 2), "unit": "USD",
-        "label": "%d session(s) started since midnight; Claude Code's estimate, not a bill" % len(rows)}})
-
-
-def cost_per_day(db):
-    today = datetime.now(timezone.utc).date()
-    first = today - timedelta(days=DAYS - 1)
-    rows = db.execute("SELECT date(started) AS day, sum(cc_cost_usd) AS cost FROM (%s) "
-                      "WHERE started >= ? GROUP BY day" % LATEST, (first.isoformat(),)).fetchall()
-    by_day = {r["day"]: r["cost"] or 0 for r in rows}
-    points = []
-    for i in range(DAYS):
-        day = (first + timedelta(days=i)).isoformat()
-        points.append({"t": day + "T00:00:00Z", "v": round(by_day.get(day, 0), 2)})
-    out({"kind": "timeseries", "data": {"unit": "USD", "series": [{"name": "cost", "points": points}]}})
 
 
 def quota(window):
@@ -165,7 +139,6 @@ def sessions(db):
             {"id": "session", "title": "Session"},
             {"id": "project", "title": "Project"},
             {"id": "model", "title": "Model"},
-            {"id": "cost", "title": "Cost", "unit": "USD"},
             {"id": "lines", "title": "Lines"},
             {"id": "last", "title": "Last recorded"},
         ],
@@ -173,7 +146,6 @@ def sessions(db):
             "session": session_cell(r["session_id"]),
             "project": r["project_dir"],
             "model": r["model_name"],
-            "cost": money(r["cc_cost_usd"]),
             "lines": None if r["lines_added"] is None else "+%d −%d" % (r["lines_added"], r["lines_removed"] or 0),
             "last": local(r["recorded_at"]),
         } for r in rows],
@@ -182,21 +154,20 @@ def sessions(db):
 
 def projects(db):
     first = (datetime.now(timezone.utc).date() - timedelta(days=DAYS - 1)).isoformat()
-    rows = db.execute("SELECT project_dir, count(*) AS sessions, sum(cc_cost_usd) AS cost FROM (%s) "
-                      "WHERE started >= ? GROUP BY project_dir ORDER BY cost DESC LIMIT 15" % LATEST,
+    rows = db.execute("SELECT project_dir, count(*) AS sessions FROM (%s) "
+                      "WHERE started >= ? GROUP BY project_dir ORDER BY sessions DESC, project_dir LIMIT 15" % LATEST,
                       (first,)).fetchall()
     out({"kind": "table", "data": {
         "columns": [
             {"id": "project", "title": "Project"},
             {"id": "sessions", "title": "Sessions"},
-            {"id": "cost", "title": "Cost", "unit": "USD"},
         ],
-        "rows": [{"project": r["project_dir"], "sessions": r["sessions"], "cost": money(r["cost"])} for r in rows],
+        "rows": [{"project": r["project_dir"], "sessions": r["sessions"]} for r in rows],
     }})
 
 
 def show_session(db, sid):
-    rows = db.execute("SELECT recorded_at, cc_cost_usd, model_name, effort, project_dir, git_branch, "
+    rows = db.execute("SELECT recorded_at, model_name, effort, project_dir, git_branch, "
                       "lines_added, lines_removed, duration_ms, ctx_pct, prompt_cache_hit_ratio "
                       "FROM snapshots WHERE session_id = ? ORDER BY recorded_at, id", (sid,)).fetchall()
     if not rows:
@@ -214,13 +185,7 @@ def show_session(db, sid):
         ("Prompt cache hit ratio", None if last["prompt_cache_hit_ratio"] is None
          else "%d%%" % round(last["prompt_cache_hit_ratio"] * 100)),
     ]
-    points = [{"t": r["recorded_at"], "v": r["cc_cost_usd"]} for r in rows]
     out({"widgets": [
-        {"id": "cost", "kind": "stat", "title": "Estimated cost",
-         "data": {"value": money(last["cc_cost_usd"]) if last["cc_cost_usd"] is not None else "—",
-                  "unit": "USD", "label": "Claude Code's estimate, not a bill"}},
-        {"id": "cost-over-time", "kind": "timeseries", "title": "Cost over the session",
-         "data": {"unit": "USD", "series": [{"name": "cost", "points": points}]}},
         {"id": "details", "kind": "list", "title": "From token-save's history",
          "data": {"items": [{"text": k, "detail": v} for k, v in facts if v]}},
     ]})
@@ -270,8 +235,7 @@ def quota_history(db):
     out(result)
 
 
-WIDGETS = {"cost-today": cost_today, "cost": cost_per_day, "sessions": sessions, "projects": projects,
-           "quota-history": quota_history}
+WIDGETS = {"sessions": sessions, "projects": projects, "quota-history": quota_history}
 
 
 def main(argv):

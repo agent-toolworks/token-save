@@ -5,7 +5,7 @@ Claude Code runs the statusline command when the session changes (and every
 `refreshInterval` seconds when that is set) and hands it the session JSON on
 stdin. This prints one line from it:
 
-    ~/git/…/repo main | 1a2b3c4d | Opus 5.5 (high) ✻ | ctx 21% free 158.0k | cache 97% msgs 4.2k warm 48m | 423.0K +530/t clear>1t | $1.23 | 5h 23% used(2h14m) · 7d ~9% used(3d11h)
+    ~/git/…/repo main | 1a2b3c4d | Opus 5.5 (high) ✻ | ctx 21% free 158.0k | cache 97% msgs 4.2k warm 48m | 423.0K +530/t clear>1t | 5h 23% used(2h14m) · 7d ~9% used(3d11h)
 
 and records what it printed into the history database (history.py), because
 the quota, Claude Code's cost figure and the context percentage reach nothing
@@ -410,12 +410,6 @@ def _request(row, warm) -> str:
     return " ".join(parts)
 
 
-def _cost(usd) -> str:
-    if usd is None:
-        return R.dim("$--")
-    return "$%.3f" % usd if 0 < usd < 0.01 else "$%.2f" % usd
-
-
 def _quota(label, pct, resets_at, borrowed=False) -> str:
     if pct is None:
         return R.dim("%s --" % label)
@@ -451,7 +445,6 @@ def render(row: dict, now: dict, warm=None, quota: dict = None) -> str:
     if now:
         import cmd_now
         parts.append(cmd_now.render_statusline(now))
-    parts.append(_cost(row["cc_cost_usd"]))
     if quota is None:
         quota = {w: (row[w + "_pct"], row[w + "_resets_at"], False)
                  for w, _ in limits.WINDOWS}

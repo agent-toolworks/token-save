@@ -8,7 +8,7 @@
 #
 # It prints, for example:
 #
-#     ~/git/…/repo main | Opus 5.5 (high) | ctx 42k/200k 21% | 423.0K +530/t clear>1t | $1.23 | 5h 23% used(2h14m) · 7d 9% used(3d11h)
+#     ~/git/…/repo main | Opus 5.5 (high) | ctx 42k/200k 21% | 423.0K +530/t clear>1t | 5h 23% used(2h14m) · 7d 9% used(3d11h)
 #
 # and records each change in ~/.claude/token-save/history.db. The guide is
 # docs/statusline.md: what each segment means, what a row holds, how to query
