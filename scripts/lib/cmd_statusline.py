@@ -244,6 +244,44 @@ def transcript_reading(transcript, write_cache: bool = True, need_ttl: bool = Tr
     return now, ttl, idle
 
 
+def account_reading(write_cache: bool = True) -> dict:
+    """The account the folder is signed in to (history.account), cached
+    against .claude.json's size and mtime. Claude Code rewrites that file
+    often, but a render between two writes reads one small cache file
+    instead of parsing a file that grows with every project."""
+    path = history.claude_json_path()
+    try:
+        st = os.stat(path)
+    except OSError:
+        return history.account(path)
+    key = [path, st.st_size, st.st_mtime_ns]
+    d = _state_dir()
+    cf = os.path.join(d, "cache", "account.json") if d else None
+    if cf:
+        try:
+            with open(cf, "rb") as fh:
+                c = json.loads(fh.read().decode("utf-8"))
+            if c.get("key") == key and isinstance(c.get("account"), dict):
+                return {k: c["account"].get(k) for k in history.ACCOUNT_COLUMNS}
+        except (OSError, ValueError, AttributeError):
+            pass
+    acct = history.account(path)
+    if cf and write_cache:
+        try:
+            os.makedirs(os.path.dirname(cf), mode=0o700, exist_ok=True)
+            tmp = "%s.%d.tmp" % (cf, os.getpid())
+            old_umask = os.umask(0o077)
+            try:
+                with open(tmp, "wb") as fh:
+                    fh.write(json.dumps({"key": key, "account": acct}).encode("utf-8"))
+            finally:
+                os.umask(old_umask)
+            os.replace(tmp, cf)
+        except Exception:
+            pass
+    return acct
+
+
 def _ttl_seconds(v):
     """"5m" / "1h" / "300s" -> seconds, or None."""
     import re
@@ -459,7 +497,8 @@ def collect(p, write_cache: bool = True):
     now, ttl, idle = transcript_reading(transcript, write_cache,
                                         need_ttl=not payload_states_ttl(p))
     row = history.row_from_payload(
-        p, now, git_branch(_str(_get(p, "workspace", "current_dir")) or _str(p.get("cwd"))))
+        p, now, git_branch(_str(_get(p, "workspace", "current_dir")) or _str(p.get("cwd"))),
+        acct=account_reading(write_cache), folder=history.config_dir())
     row["rate_limits_observed_at"] = history.observed_at(
         row, history.previous(row["session_id"]))
     quota = limits.shown(row, limits.read())
@@ -485,6 +524,10 @@ def explain(p) -> int:
         src = "from the transcript tail (the payload has no prompt_cache.ttl or expires_at)"
     print("warmth:     %s; %s" % (
         "ttl %ss, %ds left" % (warm[0] or "?", warm[1]) if warm else "not shown", src))
+    print("account:    %s" % (
+        "%s (%s)" % (row["account_email"] or "?", row["account_uuid"]) if row["account_uuid"]
+        else "none signed in, per %s: the quota is kept as an unknown account's"
+        % history.claude_json_path()))
     print("history:    %s" % history.describe())
     if not row["session_id"]:
         print("            this payload has no session_id or transcript_path: not recorded")
@@ -493,10 +536,10 @@ def explain(p) -> int:
     for w, label in limits.WINDOWS:
         pct, _at, borrowed = quota[w]
         if borrowed:
+            e = limits.entry(snap, row, w) or {}
             print("            %s shows %s%% from limits.json, observed %s by session %s,"
                   " not this payload's reading"
-                  % (label, fmt_pct(pct), _get(snap, w, "observed_at"),
-                     _get(snap, w, "session_id")))
+                  % (label, fmt_pct(pct), e.get("observed_at"), e.get("session_id")))
     print("row:")
     for name in history.NAMES:
         print("  %-26s %s" % (name, row[name]))

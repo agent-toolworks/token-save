@@ -20,6 +20,10 @@ is folded away. A field this version has no column for is listed in
 upgrade that adds a field shows up without the raw JSON (about half the file,
 measured) being stored on every row.
 
+Each row also names the Claude Code folder and the account signed in there
+(from .claude.json, which the payload does not carry), so a machine with
+several accounts can tell their rows -- and their quotas -- apart (#51).
+
 Storage is SQLite from the standard library, at
 ${CLAUDE_CONFIG_DIR:-~/.claude}/token-save/history.db. It holds numbers and
 the labels already on screen (paths, branch, model), never message content,
@@ -39,7 +43,7 @@ import sqlite3
 # Bumped on any change to COLUMNS. A database written by a NEWER version is
 # left alone rather than written with a narrower row: two versions can be
 # installed side by side, and the older one must not damage the newer's data.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # (column, type, what it is). The order is the table's column order, and new
 # columns only ever go at the end.
@@ -129,7 +133,14 @@ COLUMNS = [
     ("spend_limit_used_usd", "REAL", "gateway spend so far, US dollars (its estimate)"),
     ("spend_limit_limit_usd", "REAL", "gateway spend limit, US dollars"),
     ("spend_limit_period", "TEXT", "gateway spend limit period: daily, weekly or monthly"),
+    # -- schema 5 --
+    ("config_dir", "TEXT", "the Claude Code folder: CLAUDE_CONFIG_DIR, else ~/.claude"),
+    ("account_uuid", "TEXT", "signed-in account, from the folder's .claude.json; NULL if none"),
+    ("account_email", "TEXT", "that account's email address"),
+    ("org_uuid", "TEXT", "that account's organization id"),
+    ("org_name", "TEXT", "that account's organization name"),
 ]
+ACCOUNT_COLUMNS = ("account_uuid", "account_email", "org_uuid", "org_name")
 NAMES = [c[0] for c in COLUMNS]
 
 # Columns that change on every render without anything having happened.
@@ -257,6 +268,52 @@ def db_path():
     return os.path.join(cfg, "token-save", "history.db")
 
 
+def config_dir() -> str:
+    """The Claude Code folder this process runs for."""
+    return os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")
+
+
+def claude_json_path() -> str:
+    """The folder's global config, which holds the sign-in. Claude Code keeps
+    it inside CLAUDE_CONFIG_DIR when that is set, and beside the default
+    folder, as ~/.claude.json, when it is not (see machine.CLAUDE_JSON)."""
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        return os.path.join(config_dir(), ".claude.json")
+    return os.path.expanduser("~/.claude.json")
+
+
+# .claude.json also holds per-project history and grows with use; a file this
+# large is not one worth parsing inside a prompt to learn four strings.
+CLAUDE_JSON_MAX_BYTES = 32 * 1024 * 1024
+_ACCOUNT_KEYS = (("accountUuid", "account_uuid"), ("emailAddress", "account_email"),
+                 ("organizationUuid", "org_uuid"), ("organizationName", "org_name"))
+
+
+def account(path: str = None) -> dict:
+    """The account the folder is signed in to, as the four ACCOUNT_COLUMNS.
+
+    From `oauthAccount` in .claude.json. Every value is None when there is no
+    sign-in (an API key, a fresh folder) or the file cannot be read: the
+    quota is per account, and a guess here would merge two accounts' quotas.
+    """
+    out = dict.fromkeys(ACCOUNT_COLUMNS)
+    path = path if path is not None else claude_json_path()
+    try:
+        if os.path.getsize(path) > CLAUDE_JSON_MAX_BYTES:
+            return out
+        with open(path, "rb") as fh:
+            doc = json.loads(fh.read().decode("utf-8-sig"))
+    except (OSError, ValueError):
+        return out
+    oauth = doc.get("oauthAccount") if isinstance(doc, dict) else None
+    if isinstance(oauth, dict):
+        for key, col in _ACCOUNT_KEYS:
+            out[col] = _str(oauth.get(key))
+    if not out["account_uuid"]:
+        return dict.fromkeys(ACCOUNT_COLUMNS)
+    return out
+
+
 def utc_now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -347,10 +404,12 @@ def _known(path, v) -> bool:
 
 
 def row_from_payload(p: dict, now: dict = None, branch=None,
-                     recorded_at: str = None, source: str = "statusline") -> dict:
+                     recorded_at: str = None, source: str = "statusline",
+                     acct: dict = None, folder: str = None) -> dict:
     """The history row for one payload: every field it carries, plus the
-    `ts now` reading and branch when the caller has them. The importer passes
-    neither, and they stay NULL."""
+    `ts now` reading, branch, account and folder when the caller has them.
+    The importer passes none of them, and they stay NULL: an imported row's
+    account is not known, and the account signed in now may not be it."""
     row = {n: None for n in NAMES}
     drift = []
     for path, col, kind in FIELDS:
@@ -382,7 +441,10 @@ def row_from_payload(p: dict, now: dict = None, branch=None,
         "ts_version": os.environ.get("TS_VERSION") or None,
         "rate_limits_observed_at": None,      # observed_at(), against the previous row
         "source": source,
+        "config_dir": folder,
     })
+    for col in ACCOUNT_COLUMNS:
+        row[col] = (acct or {}).get(col)
     unknown = sorted(set(drift) | {k for k, v in payload_leaves(p) if not _known(k, v)})
     if unknown:
         row["unknown_keys"] = json.dumps(unknown)
