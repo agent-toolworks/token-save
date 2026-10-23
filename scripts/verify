@@ -3700,7 +3700,7 @@ fi
 python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute("create table snapshots (id integer primary key, recorded_at text, session_id text)"); d.execute("insert into snapshots (recorded_at, session_id) values (\"2026-01-01T00:00:00Z\", \"old\")"); d.commit()' "$TMP/older.db"
 slsay "$(slpay 2 1)" TS_HISTORY_DB="$TMP/older.db"
 result=$(python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute("pragma user_version").fetchone()[0], d.execute("select count(*), count(cc_cost_usd) from snapshots").fetchone())' "$TMP/older.db")
-if slline_ok && [[ $result == "4 (2, 1)" ]]; then
+if slline_ok && [[ $result == "5 (2, 1)" ]]; then
   ok "history: an older table gains the new columns and keeps its rows"
 else
   bad "history: did not bring an older table up to date" "got [$result]"
@@ -3959,6 +3959,112 @@ else
   bad "history: a known object of the wrong type was not reported" "got [$r]"
 fi
 
+# #51: several accounts. The payload names none, so each render reads the
+# folder's .claude.json; the quota is the account's, so limits.json keeps it
+# per account and a session only borrows from its own.
+acctjson() { # folder uuid email org-uuid org-name
+  mkdir -p "$1"
+  printf '{"numStartups":3,"oauthAccount":{"accountUuid":"%s","emailAddress":"%s","organizationUuid":"%s","organizationName":"%s","displayName":"x"}}' \
+    "$2" "$3" "$4" "$5" > "$1/.claude.json"
+}
+AC="$V2/acct"
+UA=11111111-aaaa-4aaa-8aaa-111111111111; UB=22222222-bbbb-4bbb-8bbb-222222222222
+acctjson "$AC/home" "$UA" "me@home.example" "org-1" "Home"
+slsay "$(v2pay acct0001-1 20 50)" TS_HISTORY_DB="$AC/h.db" CLAUDE_CONFIG_DIR="$AC/home"
+ok1=$(slline_ok && echo y)
+r1=$(v2db "$AC/h.db" "select config_dir, account_uuid, account_email, org_uuid, org_name from snapshots where session_id = 'acct0001-1'")
+mkdir -p "$AC/bare"
+slsay "$(v2pay acct0002-1 20 50)" TS_HISTORY_DB="$AC/h.db" CLAUDE_CONFIG_DIR="$AC/bare"
+ok2=$(slline_ok && echo y)
+r2=$(v2db "$AC/h.db" "select config_dir, account_uuid, account_email, org_uuid, org_name from snapshots where session_id = 'acct0002-1'")
+mkdir -p "$AC/broken"; printf '{ not json' > "$AC/broken/.claude.json"
+slsay "$(v2pay acct0003-1 20 50)" TS_HISTORY_DB="$AC/h.db" CLAUDE_CONFIG_DIR="$AC/broken"
+ok3=$(slline_ok && echo y)
+r3=$(v2db "$AC/h.db" "select account_uuid is null from snapshots where session_id = 'acct0003-1'")
+if [[ $ok1$ok2$ok3 == yyy && $r1 == "$AC/home|$UA|me@home.example|org-1|Home" \
+      && $r2 == "$AC/bare||||" && $r3 == 1 ]]; then
+  ok "history: a render records its folder and the account from .claude.json; NULL with none or a broken one"
+else
+  bad "history: the account was not recorded as expected" "signed in [$r1] none [$r2] broken [$r3] line ok [$ok1$ok2$ok3]"
+fi
+# /login to another account in the same folder: the cached answer is keyed on
+# the file's size and mtime, so the next render records the new account.
+acctjson "$AC/home" "$UB" "someone.else@work.example" "org-2" "Work"
+slsay "$(v2pay acct0001-1 20 50)" TS_HISTORY_DB="$AC/h.db" CLAUDE_CONFIG_DIR="$AC/home"
+r=$(v2db "$AC/h.db" "select account_uuid, account_email from snapshots where session_id = 'acct0001-1' order by id")
+if [[ $r == "$UA|me@home.example"$'\n'"$UB|someone.else@work.example" ]]; then
+  ok "history: a /login to another account is a new row naming the new account, not a cached old one"
+else
+  bad "history: the account after a /login is wrong" "got [$r]"
+fi
+
+# Two accounts, one history and one limits.json (two folders sharing a
+# TS_HISTORY_DB). A observes 22/50; a second later B observes 72/80. Each
+# account's idle session borrows its own account's reading and never the
+# other's, and the top-level windows are one account's pair.
+TW="$V2/two"
+acctjson "$TW/a" "$UA" "a@x.example" "org-a" "A"
+acctjson "$TW/b" "$UB" "b@x.example" "org-b" "B"
+twsay() { slsay "$(v2pay "$1" "$2" "$3")" TS_HISTORY_DB="$TW/h.db" CLAUDE_CONFIG_DIR="$TW/$4"; }
+twlim() { python3 - "$TW/limits.json" "$UA" "$UB" <<'TWLIM'
+import json, sys
+d = json.load(open(sys.argv[1]))
+ua, ub = sys.argv[2], sys.argv[3]
+a = d.get("accounts", {})
+top = tuple(d.get(w, {}).get(k) for w in ("five_hour", "seven_day") for k in ("account_uuid", "used_percentage"))
+print(d.get("version"), sorted(a) == sorted([ua, ub]),
+      a.get(ua, {}).get("five_hour", {}).get("used_percentage"), a.get(ua, {}).get("account_email"),
+      a.get(ub, {}).get("seven_day", {}).get("used_percentage"),
+      "A" if top[0] == top[2] == ua else "B" if top[0] == top[2] == ub else "mixed:%s" % (top,),
+      top[1], top[3])
+TWLIM
+}
+twsay a1-0001 20 50 a; twsay a1-0001 22 50 a
+sleep 1
+twsay b1-0001 70 80 b; twsay b1-0001 72 80 b
+twsay a2-0001 5 40 a; la=$(cat "$TMP/st.out")
+twsay b2-0001 6 41 b; lb=$(cat "$TMP/st.out")
+lim1=$(twlim 2>&1)
+if [[ $la == *"5h ~22% used("* && $la == *"7d ~50% used("* && $lb == *"5h ~72% used("* && $lb == *"7d ~80% used("* ]]; then
+  ok "quota: each account's idle session borrows only its own account's reading"
+else
+  bad "quota: a session borrowed another account's reading" "A [$la]  B [$lb]"
+fi
+sleep 1
+twsay a1-0001 25 51 a
+lim2=$(twlim 2>&1)
+if [[ $lim1 == "2 True 22 a@x.example 80 B 72 80" && $lim2 == "2 True 25 a@x.example 80 A 25 51" ]]; then
+  ok "limits.json format 2: readings per account; the top-level pair is the newest observer's, never a mix"
+else
+  bad "limits.json format 2 is wrong" "after B [$lim1]  after A again [$lim2]"
+fi
+out=$(env TS_HISTORY_DB="$TW/h.db" "$TS" limits 2>&1)
+if [[ $out == *"a@x.example (A)"* && $out == *"b@x.example (B)"* ]]; then
+  ok "ts limits lists each account"
+else
+  bad "ts limits does not list both accounts" "$out"
+fi
+
+# A format-1 limits.json (from before #51) names no account: it is read
+# without error, lent to nobody, and replaced by format 2 on the next write.
+F1="$V2/f1"; mkdir -p "$F1"
+acctjson "$F1/cfg" "$UA" "a@x.example" "org-a" "A"
+f1now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+printf '{"version":1,"updated_at":"%s","five_hour":{"used_percentage":99,"resets_at":%s,"observed_at":"%s","session_id":"other"},"seven_day":{"used_percentage":98,"resets_at":%s,"observed_at":"%s","session_id":"other"}}' \
+  "$f1now" $((slnow + 3600)) "$f1now" $((slnow + 90000)) "$f1now" > "$F1/limits.json"
+slsay "$(v2pay f1aaaaaa-1 10 20)" TS_HISTORY_DB="$F1/h.db" CLAUDE_CONFIG_DIR="$F1/cfg"
+l1=$(cat "$TMP/st.out"); ok1=$(slline_ok && echo y)
+t1=$(env TS_HISTORY_DB="$F1/h.db" "$TS" limits 2>&1; echo "rc=$?")
+j1=$(env TS_HISTORY_DB="$F1/h.db" "$TS" limits --json 2>&1; echo "rc=$?")
+slsay "$(v2pay f1aaaaaa-1 12 20)" TS_HISTORY_DB="$F1/h.db" CLAUDE_CONFIG_DIR="$F1/cfg"
+f1=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["version"], d["five_hour"]["used_percentage"], d["five_hour"]["account_uuid"] == sys.argv[2])' "$F1/limits.json" "$UA" 2>&1)
+if [[ $ok1 == y && $l1 == *"5h 10% used("* && $l1 != *"~"* && $t1 == *"format 1"* && $t1 == *"99% used"* \
+      && $t1 == *"rc=0" && $j1 == *'"used_percentage": 99'* && $j1 == *"rc=0" && $f1 == "2 12 True" ]]; then
+  ok "limits.json format 1 is read without error, lent to nobody, and replaced by format 2"
+else
+  bad "limits.json format 1 handled wrong" "line [$l1] ok [$ok1] limits [$t1] json [${j1:0:80}] after [$f1]"
+fi
+
 # ---------------------------------------------------------------------------
 head_ "11. HUB SOURCE  (what toolworks-hub reads, through hub-source/run)"
 # ---------------------------------------------------------------------------
@@ -4102,6 +4208,126 @@ HSCHK
 while IFS= read -r line; do
   case $line in "ok "*) ok "hub source: ${line#ok }" ;; *) bad "hub source: ${line#bad }" ;; esac
 done <<< "$hsres"
+
+# #51: every account in the hub. Three folders, as the hub names them in
+# TOOLWORKS_CLAUDE_DIRS: its own (account A, me@home), a work folder (account
+# B, me@work, which observed its quota more recently), and one whose history
+# is from before schema 5 and names no account. Then a single folder whose
+# history has rows from before and after the upgrade, which is one account.
+HSA="$HSD/acc"
+hsacc=$(python3 - "$ROOT/scripts/lib" "$HSA" <<'HSACC'
+import os, sqlite3, sys
+from datetime import datetime, timedelta, timezone
+sys.path.insert(0, sys.argv[1])
+import history, limits
+d = sys.argv[2]
+now = datetime.now(timezone.utc).replace(microsecond=0)
+at = lambda minutes: (now - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+ts = now.timestamp()
+def put(folder, sid, minutes, proj, acct=None, five=None, seven=None):
+    db = os.path.join(d, folder, "token-save", "history.db")
+    p = {"session_id": sid, "model": {"display_name": "Opus 5.5"}, "workspace": {"project_dir": proj},
+         "cost": {"total_lines_added": minutes}}
+    if five is not None:
+        p["rate_limits"] = {"five_hour": {"used_percentage": five, "resets_at": int(ts + 7200)},
+                            "seven_day": {"used_percentage": seven, "resets_at": int(ts + 90000)}}
+    row = history.row_from_payload(p, recorded_at=at(minutes))
+    if acct:
+        row.update({"config_dir": os.path.join(d, folder), "account_uuid": acct[0],
+                    "account_email": acct[1], "org_uuid": "o-" + acct[0][:4], "org_name": acct[2]})
+    if five is not None:
+        row["rate_limits_observed_at"] = row["recorded_at"]
+    r = history.record(row, db)
+    if r != "written":
+        print("record %s: %s" % (sid, r))
+    if five is not None and acct:
+        limits.update(row, os.path.join(os.path.dirname(db), "limits.json"))
+A = ("aaaa0000-0000-4000-8000-00000000000a", "me@home.example", "Home")
+B = ("bbbb0000-0000-4000-8000-00000000000b", "me@work.example", "Work")
+sid = lambda c: c * 8 + "-1111-4222-8333-444444444444"
+put("home", sid("1"), 5, "/w/home", A, 30, 60)
+put("work", sid("2"), 2, "/w/work", B, 70, 20)
+put("old", sid("3"), 3, "/w/old")
+con = sqlite3.connect(os.path.join(d, "old", "token-save", "history.db"))
+con.execute("PRAGMA user_version = 4")
+con.commit()
+con.close()
+# One account across its upgrade: a row with no account, then rows with A.
+put("one", sid("4"), 9, "/w/one")
+put("one", sid("5"), 4, "/w/one", A, 40, 10)
+HSACC
+)
+[[ -z $hsacc ]] || bad "hub source: the accounts fixture could not be built" "$hsacc"
+hsacc() { # own-folder dirs... -> "${HSCMD[@]}" with that folder as its own and the dirs as TOOLWORKS_CLAUDE_DIRS
+  local own=$1; shift
+  local dirs; dirs=$(IFS=:; echo "$*")
+  CLAUDE_CONFIG_DIR="$HSA/$own" TS_HISTORY_DB="$HSA/$own/token-save/history.db" \
+    TOOLWORKS_CLAUDE_DIRS="$dirs" bounded 20 "$HS" "${HSCMD[@]}"
+}
+for w in accounts quota-history sessions projects five-hour; do
+  HSCMD=(fetch "$w"); hsacc home "$HSA/home" "$HSA/work" "$HSA/old" > "$HSA/$w.json" 2> "$HSA/$w.err"
+  HSCMD=(fetch "$w"); hsacc one "$HSA/one" > "$HSA/one-$w.json" 2> "$HSA/one-$w.err"
+done
+HSCMD=(show session 22222222-1111-4222-8333-444444444444); hsacc home "$HSA/home" "$HSA/work" "$HSA/old" > "$HSA/show.json" 2> "$HSA/show.err"
+HSCMD=(fetch sessions); hsacc home > "$HSA/home-alone-sessions.json" 2> "$HSA/home-alone.err"
+hsares=$(python3 - "$HSA" <<'HSACHK'
+import json, os, sys
+d = sys.argv[1]
+def load(n):
+    try:
+        return json.load(open(os.path.join(d, n)))
+    except Exception as e:
+        return {"error": "%s: %s" % (n, e), "stderr": open(os.path.join(d, n.replace(".json", ".err"))).read()[-300:]
+                if os.path.exists(os.path.join(d, n.replace(".json", ".err"))) else ""}
+res = []
+def check(ok, good, bad):
+    res.append(("ok " if ok else "bad ") + (good if ok else bad))
+old = os.path.join(d, "old")
+a = load("accounts.json").get("data", {}).get("rows", [])
+check([(r["account"], r["five-hour"], r["seven-day"]) for r in a]
+      == [("me@home.example", 30, 60), ("me@work.example", 70, 20)] and all(r["observed"] for r in a),
+      "Quota by account: each folder's account, its 5h and 7d, and when observed", "accounts: %s" % a)
+q = {s["name"]: [p["v"] for p in s["points"] if p["v"] is not None]
+     for s in load("quota-history.json").get("data", {}).get("series", [])}
+check(sorted(q) == ["5h · me@home.example", "5h · me@work.example", "7d · me@home.example", "7d · me@work.example"]
+      and q["5h · me@home.example"] == [30] and q["5h · me@work.example"] == [70],
+      "quota history: a 5h and a 7d series per account", "quota-history series: %s" % q)
+sj = load("sessions.json").get("data", {})
+cols = [c["id"] for c in sj.get("columns", [])]
+who = {(r["session"]["id"] if isinstance(r["session"], dict) else r["session"])[:8]: r.get("account")
+       for r in sj.get("rows", [])}
+check(cols[:2] == ["session", "account"]
+      and who == {"22222222": "me@work.example", "33333333": old, "11111111": "me@home.example"},
+      "recent sessions: every folder's history, with an Account column; a pre-schema-5 history is labelled by its folder",
+      "sessions: columns %s accounts %s" % (cols, who))
+items = {i["text"]: i["detail"] for w in load("show.json").get("widgets", []) for i in w["data"]["items"]}
+check(items.get("Account") == "me@work.example" and items.get("Model") == "Opus 5.5",
+      "show session: finds a session in another folder's history, and names its account", "show: %s" % items)
+f = load("five-hour.json").get("data", {})
+check(f.get("value") == 70 and f.get("label", "").endswith("· me@work.example"),
+      "the 5-hour stat shows the account that observed most recently, and says which", "five-hour: %s" % f)
+p = sorted((r["project"], r["sessions"]) for r in load("projects.json").get("data", {}).get("rows", []))
+check(p == [("/w/home", 1), ("/w/old", 1), ("/w/work", 1)], "sessions by project count every folder's history",
+      "projects: %s" % p)
+# One account, its history spanning the upgrade: everything as before.
+oc = [c["id"] for c in load("one-sessions.json").get("data", {}).get("columns", [])]
+oq = [s["name"] for s in load("one-quota-history.json").get("data", {}).get("series", [])]
+of = load("one-five-hour.json").get("data", {})
+oa = [r["account"] for r in load("one-accounts.json").get("data", {}).get("rows", [])]
+check("account" not in oc and oq == ["5h", "7d"] and of.get("value") == 40 and "·" not in of.get("label", "")
+      and oa == ["me@home.example"],
+      "one account, rows from before and after schema 5: no Account column, plain 5h and 7d, an unlabelled stat",
+      "one account: columns %s series %s stat %s accounts %s" % (oc, oq, of, oa))
+alone = load("home-alone-sessions.json").get("data", {})
+check([c["id"] for c in alone.get("columns", [])] == ["session", "project", "model", "lines", "last"]
+      and len(alone.get("rows", [])) == 1,
+      "without TOOLWORKS_CLAUDE_DIRS only its own history is read", "own only: %s" % alone)
+print("\n".join(res))
+HSACHK
+)
+while IFS= read -r line; do
+  case $line in "ok "*) ok "hub source: ${line#ok }" ;; *) bad "hub source: ${line#bad }" ;; esac
+done <<< "$hsares"
 
 st=$(hsrun bounded 20 "$HS" detect)
 [[ $st == '{"state": "working", "tool_version": "'*'"}' ]] && ok "hub source: detect says working on a readable history" \

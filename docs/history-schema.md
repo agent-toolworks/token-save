@@ -18,7 +18,7 @@ the writer itself uses:
 ```json
 {
   "tool_version": "0.25.0",
-  "schema_version": 4,
+  "schema_version": 5,
   "database": "/Users/you/.claude/token-save/history.db",
   "table": "snapshots",
   "columns": [
@@ -66,7 +66,7 @@ statusline's own working state and is not part of this contract.
 
 ## Versioning
 
-`PRAGMA user_version` is the schema version. It is `4` today.
+`PRAGMA user_version` is the schema version. It is `5` today.
 
 - **Columns are only ever added.** A column is never renamed, removed, re-typed
   or given a new meaning. When columns are added, `user_version` goes up, and
@@ -85,6 +85,7 @@ statusline's own working state and is not part of this contract.
 | 2 | every remaining payload field, `rate_limits_observed_at`, `source`, and the drift canary (`unknown_keys`, `raw_payload`) |
 | 3 | the fields Claude Code added since: `scratchpad_dir`, `workspace.repo.*`, `prompt_cache.*` |
 | 4 | the fields Claude Code sends in some sessions only: `workspace.git_worktree`, `worktree.*`, `pr.*`, `agent.name`, `agent_type`, `rate_limits.spend_limit.*` |
+| 5 | the account: `config_dir`, `account_uuid`, `account_email`, `org_uuid`, `org_name` |
 
 ## What a row is
 
@@ -109,7 +110,8 @@ writes nothing, and nor does the wall clock moving on its own (see
   *change*, which only a fresh response can do. It is `NULL` until the first
   change, because the first reading a session shows may be an old one. For
   quota over time, use rows where it is set, and treat the reading as true as
-  of that time. The quota is the account's, so do not add sessions together.
+  of that time. The quota is the account's, so do not add sessions together,
+  and with more than one account keep them apart by `account_uuid`.
 - **`NULL` means "not reported".** Claude Code's payload varies by version and
   account. A column it did not send is `NULL`, never `0`. `clear_breakeven_turns`
   is also `NULL` when clearing would never pay for itself.
@@ -214,6 +216,11 @@ with every switch between NORMAL and INSERT and says nothing about usage.
 | `spend_limit_used_usd` | REAL | spend so far in US dollars, the gateway's estimate. It can be about five minutes older than `spend_limit_pct` |
 | `spend_limit_limit_usd` | REAL | the spend limit, in US dollars |
 | `spend_limit_period` | TEXT | the spend limit's period: `daily`, `weekly` or `monthly` |
+| `config_dir` | TEXT | the Claude Code folder the session ran in: `CLAUDE_CONFIG_DIR`, else `~/.claude`. `NULL` on imported rows |
+| `account_uuid` | TEXT | the account signed in to that folder, from its `.claude.json` (`oauthAccount.accountUuid`). `NULL` when none is signed in with an account (an API key, say), when the file could not be read, and on imported rows |
+| `account_email` | TEXT | that account's email address (`oauthAccount.emailAddress`) |
+| `org_uuid` | TEXT | that account's organization id (`oauthAccount.organizationUuid`) |
+| `org_name` | TEXT | that account's organization name (`oauthAccount.organizationName`) |
 
 `scripts/verify` checks that this table names the same columns, with the same
 types and in the same order, as the writer, so the two cannot drift apart.
@@ -221,32 +228,51 @@ types and in the same order, as the writer, so the two cannot drift apart.
 ## The current quota: limits.json
 
 For "the newest 5h and 7d reading right now", read `limits.json` instead of
-querying the history. It holds, per window, the newest reading any session
-has *observed* (in the `rate_limits_observed_at` sense), and which session
-saw it:
+querying the history. The quota is the account's, so it holds, for each
+account, per window, the newest reading any of its sessions has *observed* (in
+the `rate_limits_observed_at` sense), and which session saw it. This is
+format 2:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "updated_at": "2026-10-16T18:40:53Z",
-  "five_hour": {"used_percentage": 23.4, "resets_at": 1792195333,
-                "observed_at": "2026-10-16T18:40:53Z", "session_id": "1a2b3c4d-..."},
-  "seven_day": {"used_percentage": 9, "resets_at": 1792281733,
-                "observed_at": "2026-10-16T18:31:02Z", "session_id": "..."}
+  "accounts": {
+    "5f0c…": {"account_email": "me@example.com", "org_name": "Personal",
+              "org_uuid": "…", "config_dir": "/Users/you/.claude",
+              "five_hour": {"used_percentage": 23.4, "resets_at": 1792195333,
+                            "observed_at": "2026-10-16T18:40:53Z",
+                            "session_id": "1a2b3c4d-...", "account_uuid": "5f0c…"},
+              "seven_day": {"used_percentage": 9, "resets_at": 1792281733,
+                            "observed_at": "2026-10-16T18:31:02Z",
+                            "session_id": "...", "account_uuid": "5f0c…"}},
+    "9e21…": {"account_email": "me@work.example", "five_hour": {...}, "seven_day": {...}}
+  },
+  "five_hour": {"used_percentage": 23.4, ..., "account_uuid": "5f0c…"},
+  "seven_day": {"used_percentage": 9, ..., "account_uuid": "5f0c…"}
 }
 ```
 
+- `accounts` is keyed by `account_uuid`. Readings from a session whose account
+  could not be read are under `unknown`.
+- The top-level `five_hour` and `seven_day` are both the windows of the
+  account that observed most recently, and each names its `account_uuid`. A
+  reader of format 1, which had only those, keeps working and sees one
+  account's pair, never one window from each.
+- A format-1 file (`"version": 1`, no `accounts`) names no account. Its
+  readings are shown as they are and never lent to a session; the next write
+  replaces it with format 2.
 - It is replaced atomically, so a reader never sees half a file. A window
   that has never been observed is absent.
 - "Newest" is by observation time, not by value. A drop is believed: the 7d
   counter has been reset in place, with `resets_at` unchanged.
 - A window whose `resets_at` has passed is over, and its percentage says
   nothing about the current one.
-- `ts limits --json` prints the same, with the file's path. `ts limits`
-  prints it for a person.
+- `ts limits --json` prints the top-level windows, `accounts` and the file's
+  path. `ts limits` lists each account for a person.
 
-The statusline shows this reading, with a dim `~`, when it is fresher than the
-session's own. It never writes a borrowed reading back, to the history or here.
+The statusline shows its own account's reading, with a dim `~`, when it is
+fresher than the session's own. It never shows another account's. It never writes a borrowed reading back, to the history or here.
 
 ## Importing an older history
 

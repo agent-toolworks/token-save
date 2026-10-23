@@ -69,7 +69,7 @@ Nothing is sent anywhere. There is no network code in this repository.
 | Preview / apply / undo one | `ts fixes show\|apply\|revert <id>` |
 | Send my numbers to someone, safely | `ts share` |
 | A full statusline, and a history of what it showed | `ts statusline` — see [docs/statusline.md](docs/statusline.md) |
-| The freshest quota reading across sessions | `ts limits` |
+| The freshest quota reading across sessions, per account | `ts limits` |
 | Import a history kept by another recorder | `ts history import FILE` |
 
 `--json` on `audit`, `advise` and `doctor` for machine-readable output.
@@ -355,6 +355,12 @@ history, recent sessions, sessions by project over 30 days, and a section on
 each session's page. The history records Claude Code's cost estimate, but
 neither the hub nor the statusline shows it. It finds `hub-source/` inside the installed
 plugin and runs it; nothing needs configuring.
+
+With more than one account it reads every Claude Code folder the hub names
+in `TOOLWORKS_CLAUDE_DIRS`, not only its own: it adds a *Quota by account*
+table, splits the quota chart per account, adds an Account column to recent
+sessions, and names the account on a session's page. With one account
+nothing changes.
 
 `hub-source/run` reads the history the way
 [docs/history-schema.md](docs/history-schema.md) tells any reader to:

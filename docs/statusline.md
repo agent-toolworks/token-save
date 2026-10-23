@@ -17,15 +17,17 @@ can look back at usage once the session and its transcript are gone.
 | `cache 97%` | the last request's cache hit rate: cache reads over all its input. Green from 70%, yellow from 30%, red below. A sudden drop is a busted prefix | payload |
 | `msgs 4.2k` | the last request's uncached input | payload |
 | `warm 48m` / `COLD` | how long the session can sit idle before its cached prefix expires and the next turn pays a cache write. It comes from the payload's `prompt_cache` (`expires_at`, `ttl`, `warm`) when Claude Code sends it. Older versions do not, and then the TTL (1h or 5m) is read from the newest cache write in the transcript, not assumed, and the countdown runs from the transcript's age, hidden for the first minute idle (mid-turn). Yellow in the last quarter of the TTL | payload, or transcript |
-| `5h 23% used(2h14m)` · `7d ~9% used(3d11h)` | how much of the 5-hour and 7-day quota is used (`FULL` at 100%), and when each resets. A dim `~` means the reading is another session's, because it is fresher than this one's (below) | payload, `limits.json` |
+| `5h 23% used(2h14m)` · `7d ~9% used(3d11h)` | how much of the 5-hour and 7-day quota is used (`FULL` at 100%), and when each resets. A dim `~` means the reading is another session's on the same account, because it is fresher than this one's (below) | payload, `limits.json` |
 
 **Why the quota can be another session's.** `rate_limits` in the payload comes
 from the session's own last API response, and nothing refreshes it while the
 session sits idle. The quota belongs to the account, so the line keeps the
-freshest reading any session has observed (`ts limits` prints it), and shows
-that one when it is newer. "Newer" means observed more recently, not higher:
-the 7d counter has been reset in place, and a highest-wins rule would hold the
-old figure for days.
+freshest reading any session of the same account has observed (`ts limits`
+prints it), and shows that one when it is newer. "Newer" means observed more
+recently, not higher: the 7d counter has been reset in place, and a
+highest-wins rule would hold the old figure for days. Another account's
+reading is never shown, even when the two write one history (see *Several
+accounts*).
 
 ## Why record it
 
@@ -104,6 +106,28 @@ It names the `ts` it found (or says none was found), prints the line, shows the
 state of the history database, and lists every column of the row it would
 write. The line never prints an error, so `--explain` is how you find out why
 it is empty or missing a segment.
+
+### Several accounts
+
+Two Claude Code accounts on one machine usually live in two folders
+(`CLAUDE_CONFIG_DIR=~/.claude-work claude`), each with its own `settings.json`
+and plugin cache. Install the statusline in each folder, with
+`CLAUDE_CONFIG_DIR` naming it:
+
+```sh
+TS_ROOT=$(ls -d ~/.claude-work/plugins/cache/*/token-save/*/ | sort -V | tail -1)
+CLAUDE_CONFIG_DIR=~/.claude-work "$TS_ROOT/scripts/ts" fixes apply statusline --yes
+```
+
+Each folder then keeps its own history and `limits.json` under
+`<folder>/token-save/`, and `ts audit` run with the same `CLAUDE_CONFIG_DIR`
+reads that folder's transcripts. Every row records the folder (`config_dir`)
+and the account signed in to it (`account_uuid`, `account_email`, `org_uuid`,
+`org_name`), read from that folder's `.claude.json`. So two accounts that do
+share a history, after a `/login` in one folder or with one `TS_HISTORY_DB`,
+can still be told apart, and the quota stays per account: a session borrows
+only its own account's reading. `ts limits` lists each account, and
+toolworks-hub shows every folder it reads.
 
 ### Keeping a statusline of your own
 

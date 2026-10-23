@@ -39,7 +39,7 @@ import sqlite3
 # Bumped on any change to COLUMNS. A database written by a NEWER version is
 # left alone rather than written with a narrower row: two versions can be
 # installed side by side, and the older one must not damage the newer's data.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # (column, type, what it is). The order is the table's column order, and new
 # columns only ever go at the end.
@@ -129,6 +129,12 @@ COLUMNS = [
     ("spend_limit_used_usd", "REAL", "gateway spend so far, US dollars (its estimate)"),
     ("spend_limit_limit_usd", "REAL", "gateway spend limit, US dollars"),
     ("spend_limit_period", "TEXT", "gateway spend limit period: daily, weekly or monthly"),
+    # -- schema 5 --
+    ("config_dir", "TEXT", "the Claude Code folder: CLAUDE_CONFIG_DIR, else ~/.claude"),
+    ("account_uuid", "TEXT", "signed-in account, from the folder's .claude.json; NULL if none"),
+    ("account_email", "TEXT", "that account's email address"),
+    ("org_uuid", "TEXT", "that account's organization id"),
+    ("org_name", "TEXT", "that account's organization name"),
 ]
 NAMES = [c[0] for c in COLUMNS]
 

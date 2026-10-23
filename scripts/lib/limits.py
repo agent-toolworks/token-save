@@ -14,6 +14,19 @@ its own reading CHANGE), never by value. A max() across sessions is wrong: the
 resets_at, and a max-merge held the old 77% for two days. Taking the newest
 observation believes such a drop outright.
 
+The quota is the ACCOUNT's, and two accounts can write one limits.json: one
+folder after a `/login`, or two folders sharing a TS_HISTORY_DB. Format 1
+kept one reading per window across all of them, so a session on account A
+showed account B's 5h figure, marked `~` as if it were fresher news about its
+own quota (#51). Format 2 keeps the readings under `accounts.<account_uuid>`
+and a session only ever borrows from its own account. Readings from a session
+whose account could not be read are kept under `unknown`, and lent only to
+such sessions. The top-level `five_hour` and `seven_day` stay, for a format-1
+reader: both are the windows of the account that observed most recently, each
+naming its account_uuid, so that reader sees one account's pair, never a mix.
+A format-1 file's readings name no account, so none of them is lent; the
+first write replaces them.
+
 Only a session's own observations are ever written here. A value the line
 borrowed from this file is never written back, or the merge would feed on its
 own output.
@@ -36,7 +49,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import history  # noqa: E402
 
 WINDOWS = (("five_hour", "5h"), ("seven_day", "7d"))
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+# The account key for a session whose account could not be read.
+NO_ACCOUNT = "unknown"
+# What limits.json says about each account besides its readings, from the
+# newest row that wrote one.
+LABELS = ("account_email", "org_uuid", "org_name", "config_dir")
 
 
 def path():
@@ -57,6 +75,22 @@ def read(p: str = None) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def account_key(row: dict) -> str:
+    return row.get("account_uuid") or NO_ACCOUNT
+
+
+def accounts(snapshot: dict) -> dict:
+    """{account key: its entry} from a format-2 file; {} from format 1."""
+    a = snapshot.get("accounts")
+    return {k: v for k, v in a.items() if isinstance(v, dict)} if isinstance(a, dict) else {}
+
+
+def readings(snapshot: dict, key: str) -> dict:
+    """The windows limits.json holds for one account: {window: entry}."""
+    entry = accounts(snapshot).get(key) or {}
+    return {w: entry[w] for w, _ in WINDOWS if isinstance(entry.get(w), dict)}
+
+
 def own(row: dict) -> dict:
     """This session's reading of each window, as limits.json entries."""
     out = {}
@@ -66,7 +100,8 @@ def own(row: dict) -> dict:
             continue
         out[w] = {"used_percentage": pct, "resets_at": row.get(w + "_resets_at"),
                   "observed_at": row.get("rate_limits_observed_at"),
-                  "session_id": row.get("session_id")}
+                  "session_id": row.get("session_id"),
+                  "account_uuid": row.get("account_uuid")}
     return out
 
 
@@ -95,13 +130,26 @@ def pick(a, b, now_s=None):
     return a
 
 
+def observed(entry: dict) -> str:
+    """An account's newest observation time across its windows, or ""."""
+    return max((entry[w].get("observed_at") or "" for w, _ in WINDOWS
+                if isinstance(entry.get(w), dict)), default="")
+
+
+def newest(accts: dict):
+    """The key of the account that observed most recently, or None."""
+    keys = [k for k in accts if observed(accts[k])]
+    return max(keys, key=lambda k: observed(accts[k])) if keys else None
+
+
 def shown(row: dict, snapshot: dict, now_s=None) -> dict:
-    """What the line shows for each window: {window: (pct, resets_at, borrowed)}."""
+    """What the line shows for each window: {window: (pct, resets_at, borrowed)}.
+    Only this session's own account is borrowed from."""
     mine = own(row)
+    theirs = readings(snapshot, account_key(row))
     out = {}
     for w, _ in WINDOWS:
-        best = pick(mine.get(w), snapshot.get(w) if isinstance(snapshot.get(w), dict) else None,
-                    now_s)
+        best = pick(mine.get(w), theirs.get(w), now_s)
         if not best or best.get("used_percentage") is None:
             out[w] = (None, None, False)
             continue
@@ -126,15 +174,29 @@ def update(row: dict, p: str = None, now_s=None) -> str:
         return "unchanged"           # nothing observed: nothing to offer
     try:
         cur = read(p)
-        new = dict(cur)
+        accts = accounts(cur)
+        key = account_key(row)
+        mine = dict(accts.get(key) or {})
         changed = False
         for w, entry in own(row).items():
-            best = pick(cur.get(w) if isinstance(cur.get(w), dict) else None, entry, now_s)
+            best = pick(mine.get(w) if isinstance(mine.get(w), dict) else None, entry, now_s)
             if best is entry:
-                new[w] = entry
+                mine[w] = entry
                 changed = True
         if not changed:
             return "unchanged"
+        for col in LABELS:
+            if row.get(col):
+                mine[col] = row[col]
+        accts[key] = mine
+        new = dict(cur)
+        new["accounts"] = accts
+        top = newest(accts)
+        for w, _ in WINDOWS:
+            if top is not None and isinstance(accts[top].get(w), dict):
+                new[w] = accts[top][w]
+            else:
+                new.pop(w, None)     # never another account's window beside it
         new["version"] = FORMAT_VERSION
         new["updated_at"] = history.utc_now()
         directory = os.path.dirname(p)
@@ -152,16 +214,25 @@ def update(row: dict, p: str = None, now_s=None) -> str:
         return "error: %s" % e
 
 
+def account_label(key: str, entry: dict) -> str:
+    if key == NO_ACCOUNT:
+        return "account not read"
+    who = entry.get("account_email") or key
+    return "%s (%s)" % (who, entry["org_name"]) if entry.get("org_name") else who
+
+
 def main(argv=None) -> int:
     import report as R
     argv = sys.argv[1:] if argv is None else argv
     p = path()
     data = read(p) if p else {}
+    accts = accounts(data)
     if "--json" in argv:
         from transcripts import tool_version
         out = {"tool_version": tool_version(), "path": p}
         out.update({w: data.get(w) for w, _ in WINDOWS})
         out["updated_at"] = data.get("updated_at")
+        out["accounts"] = accts
         print(json.dumps(out, indent=2))
         return 0
     print(R.heading("QUOTA, FRESHEST READING ACROSS SESSIONS"))
@@ -169,18 +240,31 @@ def main(argv=None) -> int:
         print("  recording is off (TS_HISTORY=off): nothing is kept")
         return 0
     now_s = time.time()
-    for w, label in WINDOWS:
-        e = data.get(w)
-        if not isinstance(e, dict):
-            print(R.kv(label, R.dim("no observed reading yet")))
-            continue
-        import cmd_statusline as S
-        until = S.fmt_reset(e.get("resets_at"), now_s)
-        state = "window over, reset at %s" % e.get("resets_at") if _expired(e, now_s) \
-            else "resets in %s" % until
-        print(R.kv(label, "%s%% used" % S.fmt_pct(e.get("used_percentage")),
-                   "%s; observed %s by %s" % (state, e.get("observed_at"),
-                                              (e.get("session_id") or "?").split("-")[0])))
+    import cmd_statusline as S
+
+    def windows(entry):
+        for w, label in WINDOWS:
+            e = entry.get(w)
+            if not isinstance(e, dict):
+                print(R.kv(label, R.dim("no observed reading yet")))
+                continue
+            until = S.fmt_reset(e.get("resets_at"), now_s)
+            state = "window over, reset at %s" % e.get("resets_at") if _expired(e, now_s) \
+                else "resets in %s" % until
+            print(R.kv(label, "%s%% used" % S.fmt_pct(e.get("used_percentage")),
+                       "%s; observed %s by %s" % (state, e.get("observed_at"),
+                                                  (e.get("session_id") or "?").split("-")[0])))
+
+    if not accts:
+        # No accounts: nothing written yet, or a format-1 file, whose
+        # readings name no account.
+        if any(isinstance(data.get(w), dict) for w, _ in WINDOWS):
+            print("  " + R.dim("account not recorded (limits.json format 1)"))
+        windows(data)
+    for key in sorted(accts, key=lambda k: observed(accts[k]), reverse=True):
+        if len(accts) > 1 or key != NO_ACCOUNT:
+            print("\n  " + R.bold(account_label(key, accts[key])))
+        windows(accts[key])
     print("\n  " + R.dim(p))
     return 0
 
