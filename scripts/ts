@@ -60,14 +60,16 @@ COMMANDS
                    local one. Safe to re-run.
   version          Print the version.
 
-COMMON OPTIONS  (audit, advise)
+COMMON OPTIONS  (audit, advise; share takes --root)
   --project=GLOB   Only sessions under this project directory. Write it with
                    the "=". Claude Code project directories begin with "-",
                    so the space-separated form is read as another flag and
                    exits 2.
   --limit N        Only the N most recent sessions, each with the subagent
                    transcripts it spawned.
-  --root DIR       Transcript root (default ~/.claude/projects).
+  --root DIR       Transcript root (default $CLAUDE_CONFIG_DIR/projects,
+                   else ~/.claude/projects). Repeat it to read several in
+                   one run; audit then breaks the totals down per root.
   --json           Machine-readable output.
 
 ADVISE OPTIONS
@@ -91,7 +93,9 @@ WHY THIS EXISTS
   worthless here" — because it read their transcripts first.
 
 ENVIRONMENT
-  TS_TRANSCRIPT_DIR   Where transcripts live (default ~/.claude/projects).
+  TS_TRANSCRIPT_DIR   Where transcripts live (default
+                      $CLAUDE_CONFIG_DIR/projects, else ~/.claude/projects).
+                      Several, separated by ":", are read together.
   CLAUDE_CONFIG_DIR   Claude Code config dir (default ~/.claude).
   TS_HISTORY_DB       Statusline history database
                       (default $CLAUDE_CONFIG_DIR/token-save/history.db).

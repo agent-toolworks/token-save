@@ -313,6 +313,10 @@ class Session:
     images: int = 0
     mtime: float = 0.0
     is_subagent: bool = False
+    # The transcript root this was found under. One run can read several
+    # (#50), and a per-root breakdown is how it says which config dir cost
+    # what.
+    root: str = ""
     # attachment tokens and record counts keyed by Claude Code's own
     # `attachment.type`, so the report can say which cost source it is looking
     # at instead of averaging four of them together.
@@ -358,9 +362,112 @@ def _bump(d: dict, k, n) -> None:
     d[k] = d.get(k, 0) + n
 
 
+def transcript_source() -> str:
+    """Which setting chose the default transcript roots: ``TS_TRANSCRIPT_DIR``,
+    ``CLAUDE_CONFIG_DIR`` or ``default``. Messages that say where a run looked
+    name it, so a reader can tell which variable to change."""
+    if os.environ.get("TS_TRANSCRIPT_DIR"):
+        return "TS_TRANSCRIPT_DIR"
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        return "CLAUDE_CONFIG_DIR"
+    return "default"
+
+
+def _dedupe(roots) -> list:
+    out, seen = [], set()
+    for r in roots:
+        r = os.path.expanduser(r)
+        key = os.path.realpath(r)
+        if r and key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+
+def transcript_roots() -> list:
+    """The transcript roots a run reads when no ``--root`` is given.
+
+    ``TS_TRANSCRIPT_DIR`` (several, separated by ``os.pathsep``), else
+    ``$CLAUDE_CONFIG_DIR/projects``, else ``~/.claude/projects``. The middle
+    step was missing (#50): history.py and the statusline already followed
+    CLAUDE_CONFIG_DIR, so a session in a second config dir recorded its own
+    history and then reported on the default dir's transcripts, saying
+    nothing about it.
+    """
+    raw = os.environ.get("TS_TRANSCRIPT_DIR")
+    if raw:
+        roots = _dedupe(raw.split(os.pathsep))
+        if roots:
+            return roots
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cfg:
+        return [os.path.join(os.path.expanduser(cfg), "projects")]
+    return [os.path.expanduser("~/.claude/projects")]
+
+
+def resolve_roots(root=None) -> list:
+    """``root`` as a list: one path, several (``--root`` repeated), or None
+    for transcript_roots(). The same root named twice is read once."""
+    if not root:
+        return transcript_roots()
+    if isinstance(root, str):
+        return _dedupe([root])
+    return _dedupe(root) or transcript_roots()
+
+
 def transcript_dir() -> str:
-    return os.path.expanduser(
-        os.environ.get("TS_TRANSCRIPT_DIR", "~/.claude/projects"))
+    """The first transcript root. Single-root callers only; anything that
+    searches should take resolve_roots()."""
+    return transcript_roots()[0]
+
+
+def root_of(path: str, roots=None) -> str:
+    """The root ``path`` sits under, deepest first; the first root when it
+    sits under none (``ts now --session /tmp/x.jsonl``)."""
+    roots = resolve_roots(roots)
+    real = os.path.realpath(path)
+    best = None
+    for r in roots:
+        rr = os.path.realpath(r)
+        if real.startswith(rr.rstrip(os.sep) + os.sep) \
+                and (best is None or len(rr) > len(os.path.realpath(best))):
+            best = r
+    return best or roots[0]
+
+
+def root_labels(roots) -> dict:
+    """A short name per root for a table column: the config dir for a
+    ``<dir>/projects`` root (``.claude``, ``.claude-work``), else the last
+    component; the whole path wherever two would read the same."""
+    def short(r):
+        r = r.rstrip(os.sep)
+        base = os.path.basename(r)
+        return os.path.basename(os.path.dirname(r)) if base == "projects" else base
+    names = {r: short(r) for r in roots}
+    counts = {}
+    for n in names.values():
+        counts[n] = counts.get(n, 0) + 1
+    return {r: (n if n and counts[n] == 1 else r) for r, n in names.items()}
+
+
+def where(roots) -> str:
+    """The roots a run searched, for a message that says where it looked."""
+    return ", ".join(resolve_roots(roots))
+
+
+def root_hint(given) -> str:
+    """The line after "nothing found under X": which setting chose X, and
+    what to change. Empty when X came from ``--root``, which the message
+    already named back."""
+    if given:
+        return ""
+    src = transcript_source()
+    if src == "TS_TRANSCRIPT_DIR":
+        return "  that is TS_TRANSCRIPT_DIR, which is set and was used\n"
+    if src == "CLAUDE_CONFIG_DIR":
+        return ("  that is $CLAUDE_CONFIG_DIR/projects; set TS_TRANSCRIPT_DIR "
+                "or pass --root if yours live elsewhere\n")
+    return "  set TS_TRANSCRIPT_DIR or pass --root if yours live elsewhere\n"
 
 
 def tool_version() -> str:
@@ -389,7 +496,7 @@ def tool_version() -> str:
         return "unknown"
 
 
-def find_transcripts(root: str = None, project: str = None) -> list:
+def find_transcripts(root=None, project: str = None) -> list:
     """Every transcript under ``root``, at any depth.
 
     Subagent transcripts are written BELOW the session directory --
@@ -406,14 +513,27 @@ def find_transcripts(root: str = None, project: str = None) -> list:
     Recursive, then deduplicated against the flat glob, so a flat layout
     behaves exactly as before.
     """
-    root = root or transcript_dir()
+    return sorted(p for p, _r in found_pairs(root, project))
+
+
+def found_pairs(root=None, project: str = None) -> list:
+    """(path, root) for every transcript under each root. A file reachable
+    from two roots -- one nested in the other -- is counted once, under the
+    first root named."""
+    out, seen = [], set()
     scope = project or "*"
-    flat = glob.glob(os.path.join(root, scope, "*.jsonl"))
-    deep = glob.glob(os.path.join(root, scope, "**", "*.jsonl"), recursive=True)
-    return sorted(set(flat) | set(deep))
+    for r in resolve_roots(root):
+        flat = glob.glob(os.path.join(r, scope, "*.jsonl"))
+        deep = glob.glob(os.path.join(r, scope, "**", "*.jsonl"), recursive=True)
+        for p in sorted(set(flat) | set(deep)):
+            key = os.path.realpath(p)
+            if key not in seen:
+                seen.add(key)
+                out.append((p, r))
+    return out
 
 
-def find_sessions(root: str = None, project: str = None) -> list:
+def find_sessions(root=None, project: str = None) -> list:
     """Main-chain transcripts only -- one per session a human actually had.
 
     `find_transcripts()` changed meaning when discovery became recursive: it
@@ -433,9 +553,8 @@ def find_sessions(root: str = None, project: str = None) -> list:
     you mean sessions; use find_transcripts() when you mean everything that
     was billed, which is what cost accounting wants.
     """
-    root = root or transcript_dir()
-    return [p for p in find_transcripts(root, project)
-            if not is_subagent_path(p, root)]
+    return sorted(p for p, r in found_pairs(root, project)
+                  if not is_subagent_path(p, r))
 
 
 def _project_of(path: str, root: str) -> str:
@@ -515,13 +634,21 @@ def limit_to_sessions(paths: list, root: str, limit: int) -> list:
     orphan subagent -- parent not among the N, or no longer on disk -- belongs
     to no session in this window and is left out.
     """
+    return sorted(p for p, _r in limit_pairs([(p, root) for p in paths], limit))
+
+
+def limit_pairs(pairs: list, limit: int) -> list:
+    """limit_to_sessions() over (path, root) pairs from several roots. The N
+    most recent are taken across every root, and a subagent is matched to
+    its parent within its own root: two config dirs can hold the same
+    session id."""
     mains, subs = [], []
-    for p in paths:
-        (subs if is_subagent_path(p, root) else mains).append(p)
-    mains = sorted(mains, key=lambda p: -_mtime(p))[:limit]
-    keep = set(os.path.basename(p)[:-len(".jsonl")] for p in mains)
-    return sorted(mains + [p for p in subs
-                           if parent_session_of(p, root) in keep])
+    for p, r in pairs:
+        (subs if is_subagent_path(p, r) else mains).append((p, r))
+    mains = sorted(mains, key=lambda pr: -_mtime(pr[0]))[:limit]
+    keep = set((r, os.path.basename(p)[:-len(".jsonl")]) for p, r in mains)
+    return sorted(mains + [(p, r) for p, r in subs
+                           if (r, parent_session_of(p, r)) in keep])
 
 
 
@@ -571,18 +698,20 @@ def project_filter(raw: str) -> str:
     return raw
 
 
-def project_dirs(root: str = None) -> list:
-    """Project directories under ``root``, most recently written first."""
-    root = root or transcript_dir()
-    try:
-        names = [e for e in os.listdir(root)
-                 if os.path.isdir(os.path.join(root, e))]
-    except OSError:
-        return []
-    return sorted(names, key=lambda e: -_mtime(os.path.join(root, e)))
+def project_dirs(root=None) -> list:
+    """Project directories under each root, most recently written first."""
+    found = {}
+    for r in resolve_roots(root):
+        try:
+            names = [e for e in os.listdir(r) if os.path.isdir(os.path.join(r, e))]
+        except OSError:
+            continue
+        for e in names:
+            found[e] = max(found.get(e, 0.0), _mtime(os.path.join(r, e)))
+    return sorted(found, key=lambda e: -found[e])
 
 
-def unmatched_project_note(root: str, project: str) -> str:
+def unmatched_project_note(root, project: str) -> str:
     """Why an empty result is empty when a ``--project`` filter was in play.
 
     #20 made the empty-result message name the directory actually searched.
@@ -594,7 +723,8 @@ def unmatched_project_note(root: str, project: str) -> str:
     A user who mistyped a project usually cannot reconstruct the mangled form,
     so name a few that do exist rather than only reporting the miss.
     """
-    if not project or glob.glob(os.path.join(root, project)):
+    if not project or any(glob.glob(os.path.join(r, project))
+                          for r in resolve_roots(root)):
         return ""
     out = ["  --project=%s matched no project directory there\n" % project]
     have = project_dirs(root)
@@ -630,11 +760,12 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
     render would be felt. With tiktoken installed the difference is roughly
     two orders of magnitude; with the estimator it is still worth having.
     """
-    root = root or transcript_dir()
+    root = root or root_of(path)
     s = Session(path=path,
                 project=_project_of(path, root),
                 session_id=os.path.basename(path)[:-6],
-                is_subagent=is_subagent_path(path, root))
+                is_subagent=is_subagent_path(path, root),
+                root=root)
     try:
         s.mtime = os.path.getmtime(path)
     except OSError:
@@ -851,14 +982,36 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
 class Fleet:
     """Every session found, plus the totals the reports and detectors read."""
     sessions: list = field(default_factory=list)
+    # Every root searched, in order, including one that held nothing: a
+    # per-root breakdown that dropped it would hide that a config dir was
+    # read and contributed zero.
+    roots: list = field(default_factory=list)
 
     @classmethod
-    def load(cls, root: str = None, project: str = None, limit: int = None) -> "Fleet":
-        root = root or transcript_dir()
-        paths = find_transcripts(root, project)
+    def load(cls, root=None, project: str = None, limit: int = None) -> "Fleet":
+        """``root`` is one path, a list of them, or None for
+        transcript_roots()."""
+        roots = resolve_roots(root)
+        pairs = found_pairs(roots, project)
         if limit is not None:
-            paths = limit_to_sessions(paths, root, limit)
-        return cls(sessions=[parse(p, root=root) for p in paths])
+            pairs = limit_pairs(pairs, limit)
+        return cls(sessions=[parse(p, root=r) for p, r in pairs], roots=roots)
+
+    def by_root(self) -> list:
+        """Per root: (root, main sessions, subagent transcripts, turns,
+        billed, cost units), in the order the roots were given."""
+        out = []
+        for r in self.roots or sorted({s.root for s in self.sessions}):
+            mine = [s for s in self.sessions if s.root == r]
+            billed = dict(cache_read=0, cache_write=0, input=0, output=0)
+            for s in mine:
+                for k in billed:
+                    billed[k] += s.billed[k]
+            out.append((r, sum(1 for s in mine if not s.is_subagent),
+                        sum(1 for s in mine if s.is_subagent),
+                        sum(s.turns for s in mine), billed,
+                        sum(s.cost_units for s in mine)))
+        return out
 
     # -- aggregates ---------------------------------------------------------
     def billed(self) -> dict:

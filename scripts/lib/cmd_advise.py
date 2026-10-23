@@ -26,8 +26,8 @@ import report as R  # noqa: E402
 # "ts". `share` keeps its schema, where a profile outlives its tool and is
 # compared across machines.
 from transcripts import (Fleet, positive_int, project_filter,  # noqa: E402
-                         tokenizer_name, tool_version, transcript_dir,
-                         unmatched_project_note)
+                         root_hint, tokenizer_name, tool_version,
+                         unmatched_project_note, where)
 
 
 def _render(findings, fleet, show_all: bool, blocked=(), only=None) -> None:
@@ -196,7 +196,8 @@ def main(argv=None) -> int:
                     help="only this project directory (glob). Use the --project=NAME form: Claude Code project dirs begin with '-', which argparse reads as a flag")
     ap.add_argument("--limit", type=positive_int,
                     help="only the N most recent sessions")
-    ap.add_argument("--root", help="transcript root")
+    ap.add_argument("--root", action="append",
+                    help="transcript root; repeat to read several")
     ap.add_argument("--all", action="store_true",
                     help="also list the detectors that stayed silent")
     ap.add_argument("--only", help="restrict the report to these detector ids "
@@ -209,9 +210,10 @@ def main(argv=None) -> int:
         # Was: "`ts audit` explains where it looked" -- which sent the
         # reader to a message that named the wrong directory. Two hops, both
         # confident, wrong destination. Say it here instead.
-        where = args.root or transcript_dir()
-        sys.stderr.write("no usable transcripts found under %s\n" % where)
-        sys.stderr.write(unmatched_project_note(where, args.project))
+        sys.stderr.write("no usable transcripts found under %s\n"
+                         % where(fleet.roots))
+        note = unmatched_project_note(fleet.roots, args.project)
+        sys.stderr.write(note or root_hint(args.root))
         return 1
     mach = machine.collect()
 
@@ -255,6 +257,7 @@ def main(argv=None) -> int:
             "subagent_transcripts": len(fleet.subagents()),
             "turns": fleet.turns(),
             "amplification": round(fleet.amplification(), 1),
+            "roots": fleet.roots,
             # A floor, not an estimate: each overlapping group counted once,
             # so the real union is at least this. `excluded` names what was
             # left out and why, so a consumer is not silently handed a total
@@ -325,6 +328,9 @@ def main(argv=None) -> int:
                     " + %d subagent transcripts" % subn if subn else "",
                     "{:,}".format(fleet.turns()),
                     fleet.amplification(), tokenizer_name())))
+    if len(fleet.roots) > 1:
+        print(R.dim("  across %d transcript roots: %s"
+                    % (len(fleet.roots), where(fleet.roots))))
     _render(findings, fleet, args.all, blocked, only)
     print()
     return 0

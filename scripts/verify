@@ -1701,6 +1701,153 @@ TDIR
 [[ $tdir == CLEAR ]] && ok "TS_TRANSCRIPT_DIR is reported, not just searched" \
                      || bad "transcript root misreported" "${tdir//|/$'\n        '}"
 
+# #50: with only CLAUDE_CONFIG_DIR set, the transcript readers fell back to the
+# literal ~/.claude/projects while the history followed the variable, so a
+# session in a second config dir reported on the first one's transcripts. The
+# check above could not see it: this suite exports TS_TRANSCRIPT_DIR for the
+# whole run, so here it is unset, and HOME is a fake one holding a canary that
+# only a reader ignoring CLAUDE_CONFIG_DIR can reach.
+cfgonly=$(python3 - "$TMP" "$ROOT" <<'CFGONLY'
+import json, os, shutil, subprocess, sys
+
+tmp, root = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+home = os.path.join(tmp, "cfgonly-home")
+canary = os.path.join(home, ".claude", "projects")
+shutil.copytree(os.path.join(tmp, "chatter"), canary)
+cfg = os.path.join(tmp, "cfgonly-cfg")
+os.makedirs(os.path.join(cfg, "projects"))
+bad = []
+
+env = dict(os.environ, HOME=home, CLAUDE_CONFIG_DIR=cfg)
+env.pop("TS_TRANSCRIPT_DIR", None)
+for cmd in ("audit", "advise", "share"):
+    r = subprocess.run([ts, cmd, "--show"] if cmd == "share" else [ts, cmd],
+                       env=env, capture_output=True, text=True)
+    out = (r.stdout or "") + (r.stderr or "")
+    if r.returncode != 1:
+        bad.append("%s read something with $CLAUDE_CONFIG_DIR/projects empty "
+                   "(rc=%s): the canary in ~/.claude/projects" % (cmd, r.returncode))
+    if os.path.join(cfg, "projects") not in out:
+        bad.append("%s does not name $CLAUDE_CONFIG_DIR/projects: %r"
+                   % (cmd, out.strip()[:120]))
+    if canary in out or "~/.claude/projects" in out:
+        bad.append("%s names ~/.claude/projects although CLAUDE_CONFIG_DIR is set"
+                   % cmd)
+r = subprocess.run([ts, "doctor"], env=env, capture_output=True, text=True)
+line = [l for l in r.stdout.splitlines() if l.strip().startswith("transcripts ")]
+if not line or "CLAUDE_CONFIG_DIR" not in line[0] or "projects" not in line[0]:
+    bad.append("doctor does not say CLAUDE_CONFIG_DIR chose the root: %r" % line[:1])
+
+# The positive half: what is under $CLAUDE_CONFIG_DIR/projects is what is read.
+os.rmdir(os.path.join(cfg, "projects"))
+shutil.copytree(os.path.join(tmp, "bulk"), os.path.join(cfg, "projects"))
+want = json.loads(subprocess.run([ts, "audit", "--root", os.path.join(tmp, "bulk"),
+                                  "--json"], capture_output=True, text=True).stdout)
+r = subprocess.run([ts, "audit", "--json"], env=env, capture_output=True, text=True)
+try:
+    got = json.loads(r.stdout)
+    if got["billed"] != want["billed"]:
+        bad.append("audit with CLAUDE_CONFIG_DIR read %r, expected bulk's %r"
+                   % (got["billed"], want["billed"]))
+except ValueError:
+    bad.append("audit --json under CLAUDE_CONFIG_DIR failed: %r" % r.stderr[:120])
+
+# And with neither variable set, the default is still ~/.claude/projects.
+env.pop("CLAUDE_CONFIG_DIR")
+r = subprocess.run([ts, "audit", "--json"], env=env, capture_output=True, text=True)
+try:
+    if json.loads(r.stdout)["sessions"] != 3:
+        bad.append("with no variable set, ~/.claude/projects was not the default")
+except ValueError:
+    bad.append("audit with no variable set failed: %r" % r.stderr[:120])
+print("|".join(bad) if bad else "CLEAR")
+CFGONLY
+)
+[[ $cfgonly == CLEAR ]] && ok "transcripts follow CLAUDE_CONFIG_DIR when TS_TRANSCRIPT_DIR is unset (#50)" \
+                        || bad "transcript root ignores CLAUDE_CONFIG_DIR" "${cfgonly//|/$'\n        '}"
+
+# #50: one run over several roots -- `--root` repeated, or TS_TRANSCRIPT_DIR
+# split on ":" -- totals every root, and says per root what each cost. Each
+# figure is checked against the single-root run of the same fleet, not against
+# what the multi-root run printed.
+multiroot=$(python3 - "$TMP" "$ROOT" <<'MULTIROOT'
+import json, os, subprocess, sys
+
+tmp, root = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+chatter, bulk = os.path.join(tmp, "chatter"), os.path.join(tmp, "bulk")
+nothing = os.path.join(tmp, "multiroot-empty")
+os.makedirs(nothing, exist_ok=True)
+bad = []
+
+def audit(*args, env=None):
+    r = subprocess.run([ts, "audit", "--json"] + list(args), env=env,
+                       capture_output=True, text=True)
+    if r.returncode:
+        bad.append("audit %s failed: %r" % (" ".join(args), r.stderr[:120]))
+        return None
+    return json.loads(r.stdout)
+
+one = {r: audit("--root", r) for r in (chatter, bulk)}
+both = audit("--root", chatter, "--root", bulk, "--root", nothing)
+if both and all(one.values()):
+    for k in ("cache_read", "cache_write", "input", "output"):
+        if both["billed"][k] != one[chatter]["billed"][k] + one[bulk]["billed"][k]:
+            bad.append("billed.%s is not the sum of the two roots" % k)
+    if both["turns"] != one[chatter]["turns"] + one[bulk]["turns"]:
+        bad.append("turns are not the sum of the two roots")
+    per = {x["root"]: x for x in both.get("roots", [])}
+    if list(per) != [chatter, bulk, nothing]:
+        bad.append("roots are not listed in the order given, empty one "
+                   "included: %r" % list(per))
+    for r in (chatter, bulk):
+        if r in per and (per[r]["billed"] != one[r]["billed"]
+                         or per[r]["sessions"] != one[r]["sessions"]):
+            bad.append("the per-root figures for %s differ from its own run"
+                       % os.path.basename(r))
+    if nothing in per and (per[nothing]["sessions"] or per[nothing]["turns"]):
+        bad.append("an empty root reports sessions")
+
+env = dict(os.environ, TS_TRANSCRIPT_DIR=os.pathsep.join([chatter, bulk]))
+viaenv = audit(env=env)
+if viaenv and both and viaenv["billed"] != both["billed"]:
+    bad.append("TS_TRANSCRIPT_DIR split on %r does not read both roots"
+               % os.pathsep)
+
+same = audit("--root", chatter, "--root", chatter + os.sep)
+if same and one[chatter] and same["billed"] != one[chatter]["billed"]:
+    bad.append("the same root named twice is counted twice")
+
+lim = audit("--root", chatter, "--root", bulk, "--limit", "1")
+if lim and lim["sessions"] != 1:
+    bad.append("--limit 1 over two roots kept %s sessions" % lim["sessions"])
+
+r = subprocess.run([ts, "audit", "--root", chatter, "--root", bulk, "--sessions"],
+                   capture_output=True, text=True)
+if "BY TRANSCRIPT ROOT" not in r.stdout:
+    bad.append("audit prints no per-root breakdown over two roots")
+heavy = r.stdout.split("HEAVIEST SESSIONS", 1)[-1].splitlines()
+if not any(l.split()[:1] == ["chatter"] for l in heavy) \
+        or not any(l.split()[:1] == ["bulk"] for l in heavy):
+    bad.append("the sessions table does not tag each session with its root")
+r = subprocess.run([ts, "audit", "--root", chatter], capture_output=True, text=True)
+if "BY TRANSCRIPT ROOT" in r.stdout:
+    bad.append("a single root prints a per-root breakdown of one row")
+
+r = subprocess.run([ts, "advise", "--json", "--root", chatter, "--root", bulk],
+                   capture_output=True, text=True)
+try:
+    if json.loads(r.stdout)["roots"] != [chatter, bulk]:
+        bad.append("advise --json does not name both roots")
+except (ValueError, KeyError):
+    bad.append("advise over two roots failed: %r" % r.stderr[:120])
+print("|".join(bad) if bad else "CLEAR")
+MULTIROOT
+)
+[[ $multiroot == CLEAR ]] && ok "several transcript roots are read in one run and broken down per root (#50)" \
+                          || bad "multi-root reading wrong" "${multiroot//|/$'\n        '}"
+
 # #40: a plugin install is a copy that nothing updates, and ts had no way to
 # say it was stale (#37). doctor now compares, offline, the running version
 # with the plugin cache, with what Claude Code loads, and with a marketplace

@@ -6,7 +6,7 @@ billed for, how much was NEW work and how much was re-reading what was already
 there? That ratio is the amplification factor, and it is the number every
 recommendation in `ts advise` is ranked by.
 
-Usage: audit.py [--project GLOB] [--limit N] [--sessions] [--json]
+Usage: audit.py [--project GLOB] [--limit N] [--sessions] [--root DIR]... [--json]
 """
 from __future__ import annotations
 
@@ -21,9 +21,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import report as R  # noqa: E402
 from transcripts import (  # noqa: E402
     PRICE, Fleet, command_program, human, pct, positive_int, project_filter,
-    quantile, tokenizer_name, tool_version, transcript_dir,
-    unmatched_project_note,
+    quantile, root_hint, root_labels, tokenizer_name, tool_version, unmatched_project_note,
+    where,
 )
+
+HOME = os.path.expanduser("~")
+
+
+def _short(p: str) -> str:
+    return p.replace(HOME, "~", 1) if p.startswith(HOME) else p
 
 
 def _billed_block(fleet: Fleet) -> str:
@@ -214,11 +220,30 @@ def _bash_block(fleet: Fleet) -> str:
     return "\n".join(out)
 
 
+def _roots_block(fleet: Fleet) -> str:
+    """Which root cost what. Only with more than one: with one, every row
+    of it is the totals above."""
+    if len(fleet.roots) < 2:
+        return ""
+    total = fleet.cost_units()
+    rows = [[_short(r), "{:,}".format(n), "{:,}".format(subs),
+             "{:,}".format(turns), human(cost), "%.1f%%" % pct(cost, total)]
+            for r, n, subs, turns, _b, cost in fleet.by_root()]
+    out = [R.heading("BY TRANSCRIPT ROOT")]
+    out.append(R.table(rows, ["root", "sessions", "subagents", "turns",
+                              "cost", "share"], "lrrrrr"))
+    return "\n".join(out)
+
+
 def _sessions_block(fleet: Fleet, limit: int = 12) -> str:
     subs = sorted(fleet.substantive(), key=lambda s: -s.cost_units)[:limit]
+    # A session id says nothing about which config dir it came from, so with
+    # several roots each row names its own.
+    several = len(fleet.roots) > 1
+    label = root_labels(fleet.roots)
     rows = []
     for s in subs:
-        rows.append([
+        rows.append(([label.get(s.root, s.root)[:24]] if several else []) + [
             s.project[:26], s.session_id[:8], "{:,}".format(s.turns),
             "{:,}".format(s.floor), "{:,}".format(s.peak),
             "%.0fx" % (s.peak / s.floor) if s.floor else "-",
@@ -227,8 +252,9 @@ def _sessions_block(fleet: Fleet, limit: int = 12) -> str:
     out = [R.heading("HEAVIEST SESSIONS  (by cost units)")]
     out.append(R.table(
         rows,
-        ["project", "id", "turns", "preamble", "peak ctx", "growth", "cost"],
-        "llrrrrr"))
+        (["root"] if several else [])
+        + ["project", "id", "turns", "preamble", "peak ctx", "growth", "cost"],
+        ("l" if several else "") + "llrrrrr"))
     return "\n".join(out)
 
 
@@ -250,6 +276,10 @@ def _as_json(fleet: Fleet) -> str:
         "content": fleet.buckets(),
         "content_total": fleet.content_total(),
         "amplification": round(fleet.amplification(), 1),
+        "roots": [{
+            "root": r, "sessions": n, "subagent_transcripts": subs,
+            "turns": turns, "billed": billed, "cost_units": round(cost, 1),
+        } for r, n, subs, turns, billed, cost in fleet.by_root()],
         "session_shape": {
             "turns_median": quantile(turns, 0.5),
             "turns_p90": quantile(turns, 0.9),
@@ -281,32 +311,26 @@ def main(argv=None) -> int:
                     help="only the N most recent sessions")
     ap.add_argument("--sessions", action="store_true", help="per-session table")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
-    ap.add_argument("--root", help="transcript root (default ~/.claude/projects)")
+    ap.add_argument("--root", action="append",
+                    help="transcript root (default $CLAUDE_CONFIG_DIR/projects, "
+                         "else ~/.claude/projects); repeat to read several")
     args = ap.parse_args(argv)
 
     fleet = Fleet.load(root=args.root, project=args.project, limit=args.limit)
     if not fleet.sessions:
-        # transcript_dir() resolves TS_TRANSCRIPT_DIR; re-deriving the default
+        # where() resolves the roots the load used; re-deriving the default
         # here meant the one message whose entire job is to say where we looked
         # named somewhere we did not look, and then advised setting the variable
         # that was already set and already honoured.
-        where = args.root or transcript_dir()
-        sys.stderr.write("no transcripts found under %s\n" % where)
-        note = unmatched_project_note(where, args.project)
+        sys.stderr.write("no transcripts found under %s\n" % where(fleet.roots))
+        note = unmatched_project_note(fleet.roots, args.project)
         sys.stderr.write(note)
         # When the filter is what missed, the root was right, and pointing at
         # TS_TRANSCRIPT_DIR sends the reader to re-check a setting that is not
         # the problem -- the same wrong-destination advice #20 removed, one
         # level in.
-        if note:
-            pass
-        elif not args.root and not os.environ.get("TS_TRANSCRIPT_DIR"):
-            sys.stderr.write(
-                "  set TS_TRANSCRIPT_DIR or pass --root if yours live "
-                "elsewhere\n")
-        elif not args.root:
-            sys.stderr.write(
-                "  that is TS_TRANSCRIPT_DIR, which is set and was used\n")
+        if not note:
+            sys.stderr.write(root_hint(args.root))
         return 1
     if not fleet.turns():
         sys.stderr.write(
@@ -330,6 +354,9 @@ def main(argv=None) -> int:
     print(_billed_block(fleet))
     print(_content_block(fleet))
     print(_amplification_block(fleet))
+    roots = _roots_block(fleet)
+    if roots:
+        print(roots)
     shape = _shape_block(fleet)
     if shape:
         print(shape)
