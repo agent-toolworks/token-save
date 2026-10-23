@@ -10,7 +10,9 @@ stdin. This prints one line from it:
 and records what it printed into the history database (history.py), because
 the quota, Claude Code's cost figure and the context percentage reach nothing
 else that keeps them (#41). The quota shown is the freshest reading across
-sessions (limits.py), marked `~` when it is not this session's own.
+sessions of the same account (limits.py), marked `~` when it is not this
+session's own. Each row records the account, from the folder's .claude.json
+(account.py).
 
 The `ts now` reading (growth per turn, when clearing pays) is not shown, but
 the history records it. It is computed in this process from the transcript, not
@@ -39,6 +41,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import account  # noqa: E402
 import history  # noqa: E402
 import limits  # noqa: E402
 import report as R  # noqa: E402
@@ -460,6 +463,10 @@ def collect(p, write_cache: bool = True):
                                         need_ttl=not payload_states_ttl(p))
     row = history.row_from_payload(
         p, now, git_branch(_str(_get(p, "workspace", "current_dir")) or _str(p.get("cwd"))))
+    # The payload names no account, and the quota is the account's (#51).
+    d = _state_dir()
+    row.update(account.columns(
+        os.path.join(d, "cache", "account.json") if d and write_cache else None))
     row["rate_limits_observed_at"] = history.observed_at(
         row, history.previous(row["session_id"]))
     quota = limits.shown(row, limits.read())
@@ -489,7 +496,9 @@ def explain(p) -> int:
     if not row["session_id"]:
         print("            this payload has no session_id or transcript_path: not recorded")
     print("limits:     %s" % (limits.path() or "off"))
-    snap = limits.read()
+    print("account:    %s" % (row["account_email"] or row["account_uuid"]
+                                or "none read from %s" % account.claude_json()))
+    snap = limits.readings(limits.read(), limits.account_key(row))
     for w, label in limits.WINDOWS:
         pct, _at, borrowed = quota[w]
         if borrowed:

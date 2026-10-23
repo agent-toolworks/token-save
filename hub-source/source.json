@@ -10,6 +10,7 @@
     {"id": "seven-day", "kind": "stat", "title": "7-day quota"},
     {"id": "quota-history", "kind": "timeseries", "title": "5-hour and 7-day quota over time",
      "ranges": ["6h", "12h", "24h", "3d", "7d", "14d", "30d"]},
+    {"id": "accounts", "kind": "table", "title": "Quota by account"},
     {"id": "sessions", "kind": "table", "title": "Recent sessions"},
     {"id": "projects", "kind": "table", "title": "Sessions by project, last 30 days"}
   ],

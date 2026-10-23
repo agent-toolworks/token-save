@@ -13,6 +13,15 @@ opened read-only with a busy timeout; columns selected by name; a session's
 totals taken from its latest row, never summed across rows. The current
 quota comes from limits.json, through limits.read(). Nothing here writes.
 
+Several accounts (#51). A second account usually lives in its own Claude Code
+folder (`CLAUDE_CONFIG_DIR=~/.claude-work claude`), with its own history and
+limits.json, which history.db_path() alone never finds. The hub names every
+folder it reads in TOOLWORKS_CLAUDE_DIRS (joined with os.pathsep, its own
+first), and this reads `<folder>/token-save/history.db` and `limits.json` in
+each of them as well as its own. Rows and readings are told apart by account
+(schema 5, limits.json format 2); a history that names no account is labelled
+by its folder. With one account every output is what it was before.
+
 detect reports `stale` from the same on-disk check `ts doctor` makes
 (machine.plugin_installs), so the hub and the doctor never disagree.
 """
@@ -27,14 +36,17 @@ from datetime import datetime, timedelta, timezone
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts", "lib"))
 
+import account  # noqa: E402
 import history  # noqa: E402
 import limits  # noqa: E402
 import machine  # noqa: E402
 
 NEEDS_SCHEMA = 2  # rate_limits_observed_at and source arrived in schema 2
+ACCOUNT_SCHEMA = 5  # account_uuid and the rest arrived in schema 5
 DAYS = 30
 RECENT = 20
 TS = os.path.join(ROOT, "scripts", "ts")
+HOME = os.path.expanduser("~")
 # Only a Claude Code session ID can link to the hub's session page; anything
 # else (an imported row from another recorder, say) stays plain text.
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -42,12 +54,12 @@ UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 LATEST = """
 WITH ranked AS (
   SELECT session_id, recorded_at, project_dir, model_name,
-         lines_added, lines_removed,
+         lines_added, lines_removed, %s AS account_uuid,
          row_number() OVER (PARTITION BY session_id ORDER BY recorded_at DESC, id DESC) AS n,
          min(recorded_at) OVER (PARTITION BY session_id) AS started
   FROM snapshots)
 SELECT session_id, recorded_at, project_dir, model_name,
-       lines_added, lines_removed, started
+       lines_added, lines_removed, account_uuid, started
 FROM ranked WHERE n = 1
 """
 
@@ -85,24 +97,175 @@ def session_cell(sid):
     return {"ref": "session", "id": sid, "label": sid[:8]} if UUID.match(sid or "") else sid
 
 
+def short(path):
+    return "~" + path[len(HOME):] if path == HOME or path.startswith(HOME + os.sep) else path
+
+
+# ---- the folders and their accounts ------------------------------------------
+
+class Folder:
+    """One Claude Code folder: its history, its limits.json, and who wrote them."""
+
+    def __init__(self, path, db_path, limits_path):
+        self.path, self.db_path, self.limits_path = path, db_path, limits_path
+        self.db = None          # an open connection, once load() has read it
+        self.schema = 0
+        self.skipped = None     # why the history was left out, if it was
+        self.default = None     # the identity of rows that name no account
+
+
+def folders():
+    """Every folder to read: this source's own first, then each the hub names
+    in TOOLWORKS_CLAUDE_DIRS. A history reached twice is read once."""
+    own = history.db_path()
+    if own is None:
+        return []
+    found = [Folder(account.config_dir(), own, limits.path())]
+    seen = {os.path.realpath(own)}
+    for d in (os.environ.get("TOOLWORKS_CLAUDE_DIRS") or "").split(os.pathsep):
+        if not d.strip():
+            continue
+        d = os.path.expanduser(d.strip())
+        db = os.path.join(d, "token-save", "history.db")
+        if os.path.realpath(db) in seen:
+            continue
+        seen.add(os.path.realpath(db))
+        found.append(Folder(d, db, os.path.join(d, "token-save", "limits.json")))
+    return found
+
+
+class Fleet:
+    """What every folder holds, told apart by account.
+
+    An identity is an account_uuid, or `folder:<path>` for rows and readings
+    from a folder that names no account. Within one folder, rows that name no
+    account (written before schema 5, or while .claude.json could not be read)
+    belong to the folder's only account when it has exactly one: otherwise one
+    account upgrading its history would read as two.
+    """
+
+    def __init__(self):
+        self.folders = folders()
+        self.info = {}       # identity -> {"email", "org"}
+        self.quota = {}      # identity -> {window: limits.json entry}
+        for f in self.folders:
+            self._load(f)
+        self.label = self._labels()
+
+    def _load(self, f):
+        known = {}
+        unattributed = False
+        if os.path.isfile(f.db_path):
+            try:
+                f.db = connect(f.db_path)
+                f.schema = f.db.execute("PRAGMA user_version").fetchone()[0]
+                f.db.execute("SELECT 1 FROM snapshots LIMIT 1").fetchall()
+            except sqlite3.Error as e:
+                f.skipped, f.db = "could not be read (%s)" % e, None
+            if f.db is not None and f.schema < NEEDS_SCHEMA:
+                f.skipped = "is schema %d; this needs %d or later" % (f.schema, NEEDS_SCHEMA)
+                f.db.close()
+                f.db = None
+        if f.db is not None:
+            if f.schema >= ACCOUNT_SCHEMA:
+                # SQLite takes the bare columns from the row holding max():
+                # each account's newest email and organization name.
+                for r in f.db.execute("SELECT account_uuid, account_email, org_name, max(recorded_at) "
+                                      "FROM snapshots WHERE account_uuid IS NOT NULL GROUP BY account_uuid"):
+                    known[r[0]] = {"email": r[1], "org": r[2]}
+                unattributed = f.db.execute("SELECT 1 FROM snapshots WHERE account_uuid IS NULL LIMIT 1").fetchone()
+            else:
+                unattributed = f.db.execute("SELECT 1 FROM snapshots LIMIT 1").fetchone()
+        snap = limits.read(f.limits_path) if f.limits_path else {}
+        accts = limits.accounts(snap)
+        for key, entry in accts.items():
+            if key != limits.NO_ACCOUNT:
+                known.setdefault(key, {"email": entry.get("account_email"), "org": entry.get("org_name")})
+        f.default = next(iter(known)) if len(known) == 1 else "folder:" + f.path
+        for key, info in known.items():
+            self.info.setdefault(key, info)
+        # Readings, each merged into its account's by limits.pick().
+        sources = [(key if key != limits.NO_ACCOUNT else f.default, entry) for key, entry in accts.items()]
+        if not accts:
+            sources = [(f.default, snap)]            # format 1: names no account
+        for ident, entry in sources:
+            for w, _ in limits.WINDOWS:
+                e = entry.get(w)
+                if isinstance(e, dict) and e.get("used_percentage") is not None:
+                    have = self.quota.setdefault(ident, {})
+                    have[w] = limits.pick(have.get(w), e)
+                    unattributed = unattributed or ident == f.default
+        if unattributed and f.default.startswith("folder:"):
+            self.info.setdefault(f.default, {})
+
+    def _labels(self):
+        """identity -> a short name: the email, with the organization when two
+        accounts share one, else the folder."""
+        emails = {}
+        for ident, info in self.info.items():
+            if not ident.startswith("folder:") and info.get("email"):
+                emails[info["email"]] = emails.get(info["email"], 0) + 1
+        out = {}
+        for ident, info in self.info.items():
+            if ident.startswith("folder:"):
+                out[ident] = short(ident[len("folder:"):])
+            elif info.get("email") and emails[info["email"]] == 1:
+                out[ident] = info["email"]
+            elif info.get("email") and info.get("org"):
+                out[ident] = "%s (%s)" % (info["email"], info["org"])
+            else:
+                out[ident] = ident[:8]
+        return out
+
+    @property
+    def several(self):
+        return len(self.info) > 1
+
+    def identity(self, f, account_uuid):
+        return account_uuid or f.default
+
+    def histories(self):
+        return [f for f in self.folders if f.db is not None]
+
+    def notice(self):
+        skipped = ["%s %s" % (short(f.db_path), f.skipped) for f in self.folders if f.skipped]
+        return ("left out: " + "; ".join(skipped)) if skipped else None
+
+    def close(self):
+        for f in self.folders:
+            if f.db is not None:
+                f.db.close()
+
+
+def emit(result, fleet):
+    n = fleet.notice()
+    if n:
+        result["notice"] = n
+    out(result)
+
+
+# ---- commands ------------------------------------------------------------------
+
 def detect():
     path = history.db_path()
     if path is None:
         return out({"state": "off", "reason": "recording is off (TS_HISTORY is set to off)"})
-    if not os.path.isfile(path):
+    others = [f.db_path for f in folders()[1:] if os.path.isfile(f.db_path)]
+    if not os.path.isfile(path) and not others:
         return out({"state": "not_set_up", "reason": "nothing recorded yet: there is no history at %s" % path,
                     "fix": "%s fixes apply statusline, then restart Claude Code" % TS})
-    try:
-        db = connect(path)
-        schema = db.execute("PRAGMA user_version").fetchone()[0]
-        db.execute("SELECT 1 FROM snapshots LIMIT 1").fetchall()
-        db.close()
-    except sqlite3.Error as e:
-        return out({"state": "broken", "reason": "the history at %s could not be read (%s)" % (path, e)})
-    if schema < NEEDS_SCHEMA:
-        return out({"state": "incompatible",
-                    "reason": "the history is schema %d; this needs %d or later" % (schema, NEEDS_SCHEMA),
-                    "fix": "open Claude Code: the statusline upgrades the history on its next render"})
+    if os.path.isfile(path):
+        try:
+            db = connect(path)
+            schema = db.execute("PRAGMA user_version").fetchone()[0]
+            db.execute("SELECT 1 FROM snapshots LIMIT 1").fetchall()
+            db.close()
+        except sqlite3.Error as e:
+            return out({"state": "broken", "reason": "the history at %s could not be read (%s)" % (path, e)})
+        if schema < NEEDS_SCHEMA:
+            return out({"state": "incompatible",
+                        "reason": "the history is schema %d; this needs %d or later" % (schema, NEEDS_SCHEMA),
+                        "fix": "open Claude Code: the statusline upgrades the history on its next render"})
     ver = version()
     stale = machine.plugin_installs(ROOT, ver)["stale"]
     if stale:
@@ -111,20 +274,32 @@ def detect():
     out({"state": "working", "tool_version": ver})
 
 
-def quota(window):
-    """One quota window from limits.json, or why there is no reading."""
-    entry = limits.read().get(window)
+def _when(resets):
+    return datetime.fromtimestamp(resets).astimezone()
+
+
+def quota(fleet, window):
+    """One quota window, or why there is no reading. With several accounts,
+    the account that observed most recently, named."""
+    if fleet.several:
+        who = limits.newest(fleet.quota)
+        entry = fleet.quota.get(who, {}).get(window) if who else None
+        suffix = " · %s" % fleet.label.get(who, who) if who else ""
+    else:
+        entry = next(iter(fleet.quota.values()), {}).get(window)
+        suffix = ""
     if not isinstance(entry, dict) or entry.get("used_percentage") is None:
-        return out({"kind": "stat", "data": {"value": "—", "label": "not observed yet"}})
+        return out({"kind": "stat", "data": {"value": "—", "label": "not observed yet" + suffix}})
     resets = entry.get("resets_at")
     now = datetime.now(timezone.utc).timestamp()
     if isinstance(resets, (int, float)) and resets <= now:
-        when = datetime.fromtimestamp(resets).astimezone().strftime("%Y-%m-%d %H:%M")
-        return out({"kind": "stat", "data": {"value": "—", "label": "the window reset at %s; no reading since" % when}})
+        when = _when(resets).strftime("%Y-%m-%d %H:%M")
+        return out({"kind": "stat", "data": {"value": "—",
+                                             "label": "the window reset at %s; no reading since%s" % (when, suffix)}})
     label = "used"
     if isinstance(resets, (int, float)):
-        label = "used; resets %s" % datetime.fromtimestamp(resets).astimezone().strftime("%a %H:%M")
-    result = {"kind": "stat", "data": {"value": round(entry["used_percentage"]), "unit": "%", "label": label}}
+        label = "used; resets %s" % _when(resets).strftime("%a %H:%M")
+    result = {"kind": "stat", "data": {"value": round(entry["used_percentage"]), "unit": "%", "label": label + suffix}}
     if isinstance(resets, (int, float)):
         result["data"]["resets_at"] = utc(datetime.fromtimestamp(resets, timezone.utc))
     if isinstance(entry.get("observed_at"), str):
@@ -132,45 +307,99 @@ def quota(window):
     out(result)
 
 
-def sessions(db):
-    rows = db.execute("SELECT * FROM (%s) ORDER BY recorded_at DESC LIMIT ?" % LATEST, (RECENT,)).fetchall()
-    out({"kind": "table", "data": {
+def accounts(fleet):
+    """Quota by account: each account's 5h and 7d, when each resets, and when
+    it was last observed."""
+    now = datetime.now(timezone.utc).timestamp()
+    rows = []
+    for ident in sorted(fleet.quota, key=lambda i: fleet.label.get(i, i)):
+        q = fleet.quota[ident]
+        row = {"account": fleet.label.get(ident, ident)}
+        for w, col in (("five_hour", "five-hour"), ("seven_day", "seven-day")):
+            e = q.get(w) or {}
+            resets = e.get("resets_at")
+            over = isinstance(resets, (int, float)) and resets <= now
+            pct = e.get("used_percentage")
+            row[col] = None if pct is None or over else round(pct)
+            row[col + "-resets"] = None if not isinstance(resets, (int, float)) else (
+                "window over" if over else _when(resets).strftime("%a %H:%M"))
+        row["observed"] = local(limits.observed(q)) or None
+        rows.append(row)
+    emit({"kind": "table", "data": {
         "columns": [
-            {"id": "session", "title": "Session"},
-            {"id": "project", "title": "Project"},
-            {"id": "model", "title": "Model"},
-            {"id": "lines", "title": "Lines"},
-            {"id": "last", "title": "Last recorded"},
+            {"id": "account", "title": "Account"},
+            {"id": "five-hour", "title": "5h used", "unit": "%"},
+            {"id": "five-hour-resets", "title": "5h resets"},
+            {"id": "seven-day", "title": "7d used", "unit": "%"},
+            {"id": "seven-day-resets", "title": "7d resets"},
+            {"id": "observed", "title": "Observed"},
         ],
-        "rows": [{
+        "rows": rows,
+    }}, fleet)
+
+
+def _latest(f):
+    col = "account_uuid" if f.schema >= ACCOUNT_SCHEMA else "NULL"
+    return LATEST % col
+
+
+def sessions(fleet):
+    rows = []
+    for f in fleet.histories():
+        for r in f.db.execute("SELECT * FROM (%s) ORDER BY recorded_at DESC LIMIT ?" % _latest(f), (RECENT,)):
+            rows.append((f, r))
+    rows.sort(key=lambda fr: fr[1]["recorded_at"] or "", reverse=True)
+    columns = [
+        {"id": "session", "title": "Session"},
+        {"id": "project", "title": "Project"},
+        {"id": "model", "title": "Model"},
+        {"id": "lines", "title": "Lines"},
+        {"id": "last", "title": "Last recorded"},
+    ]
+    if fleet.several:
+        columns.insert(1, {"id": "account", "title": "Account"})
+    table = []
+    for f, r in rows[:RECENT]:
+        row = {
             "session": session_cell(r["session_id"]),
             "project": r["project_dir"],
             "model": r["model_name"],
             "lines": None if r["lines_added"] is None else "+%d −%d" % (r["lines_added"], r["lines_removed"] or 0),
             "last": local(r["recorded_at"]),
-        } for r in rows],
-    }})
+        }
+        if fleet.several:
+            ident = fleet.identity(f, r["account_uuid"])
+            row["account"] = fleet.label.get(ident, ident)
+        table.append(row)
+    emit({"kind": "table", "data": {"columns": columns, "rows": table}}, fleet)
 
 
-def projects(db):
+def projects(fleet):
     first = (datetime.now(timezone.utc).date() - timedelta(days=DAYS - 1)).isoformat()
-    rows = db.execute("SELECT project_dir, count(*) AS sessions FROM (%s) "
-                      "WHERE started >= ? GROUP BY project_dir ORDER BY sessions DESC, project_dir LIMIT 15" % LATEST,
-                      (first,)).fetchall()
-    out({"kind": "table", "data": {
+    counts = {}
+    for f in fleet.histories():
+        for r in f.db.execute("SELECT project_dir FROM (%s) WHERE started >= ?" % _latest(f), (first,)):
+            counts[r[0]] = counts.get(r[0], 0) + 1
+    # SQLite's order: most sessions first, then the project, NULL before text.
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0] is not None, kv[0] or ""))[:15]
+    emit({"kind": "table", "data": {
         "columns": [
             {"id": "project", "title": "Project"},
             {"id": "sessions", "title": "Sessions"},
         ],
-        "rows": [{"project": r["project_dir"], "sessions": r["sessions"]} for r in rows],
-    }})
+        "rows": [{"project": p, "sessions": n} for p, n in ranked],
+    }}, fleet)
 
 
-def show_session(db, sid):
-    rows = db.execute("SELECT recorded_at, model_name, effort, project_dir, git_branch, "
-                      "lines_added, lines_removed, duration_ms, ctx_pct, prompt_cache_hit_ratio "
-                      "FROM snapshots WHERE session_id = ? ORDER BY recorded_at, id", (sid,)).fetchall()
-    if not rows:
+def show_session(fleet, sid):
+    for f in fleet.histories():
+        rows = f.db.execute("SELECT recorded_at, model_name, effort, project_dir, git_branch, "
+                            "lines_added, lines_removed, duration_ms, ctx_pct, prompt_cache_hit_ratio, %s AS account_uuid "
+                            "FROM snapshots WHERE session_id = ? ORDER BY recorded_at, id"
+                            % ("account_uuid" if f.schema >= ACCOUNT_SCHEMA else "NULL"), (sid,)).fetchall()
+        if rows:
+            break
+    else:
         return out({"widgets": []})
     last = rows[-1]
     peak = max((r["ctx_pct"] for r in rows if r["ctx_pct"] is not None), default=None)
@@ -185,6 +414,9 @@ def show_session(db, sid):
         ("Prompt cache hit ratio", None if last["prompt_cache_hit_ratio"] is None
          else "%d%%" % round(last["prompt_cache_hit_ratio"] * 100)),
     ]
+    if fleet.several:
+        ident = fleet.identity(f, last["account_uuid"])
+        facts.insert(0, ("Account", fleet.label.get(ident, ident)))
     out({"widgets": [
         {"id": "details", "kind": "list", "title": "From token-save's history",
          "data": {"items": [{"text": k, "detail": v} for k, v in facts if v]}},
@@ -196,7 +428,22 @@ GAP = 3600           # seconds without a reading that break the line
 HISTORY_DAYS = 30    # the longest range the hub offers
 
 
-def quota_history(db):
+def _series(buckets):
+    """The 5h and 7d points from {bucket start: [5h, 7d]}, a gap breaking the line."""
+    five, seven = [], []
+    previous = None
+    for start in sorted(buckets):
+        t = utc(datetime.fromtimestamp(start, timezone.utc))
+        for i, s in enumerate((five, seven)):
+            if previous is not None and start - previous > GAP:
+                s.append({"t": utc(datetime.fromtimestamp(previous + BUCKET, timezone.utc)), "v": None})
+            v = buckets[start][i]
+            s.append({"t": t, "v": None if v is None else round(v, 1)})
+        previous = start
+    return five, seven
+
+
+def quota_history(fleet):
     """The 5-hour and 7-day quota over the last 30 days, one chart.
 
     From observed readings only (rate_limits_observed_at set), true as of that
@@ -204,59 +451,72 @@ def quota_history(db):
     reading, which only rows with a fresh observation leave out. The quota is
     the account's, so sessions are not added together; each 10-minute bucket
     takes the highest reading seen in it (a window can reset inside one). An
-    hour with no reading breaks the line rather than drawing across it.
+    hour with no reading breaks the line rather than drawing across it. With
+    several accounts, each has its own 5h and 7d series.
     """
     since = utc(datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS))
-    rows = db.execute("SELECT rate_limits_observed_at AS t, five_hour_pct, seven_day_pct FROM snapshots "
-                      "WHERE rate_limits_observed_at >= ? ORDER BY rate_limits_observed_at", (since,)).fetchall()
-    buckets = {}
-    for r in rows:
-        try:
-            ts = datetime.fromisoformat(r["t"].replace("Z", "+00:00")).timestamp()
-        except (AttributeError, ValueError):
-            continue
-        b = buckets.setdefault(int(ts // BUCKET) * BUCKET, [None, None])
-        for i, v in enumerate((r["five_hour_pct"], r["seven_day_pct"])):
-            if v is not None and (b[i] is None or v > b[i]):
-                b[i] = v
-    series = [{"name": "5h", "points": []}, {"name": "7d", "points": []}]
-    previous = None
-    for start in sorted(buckets):
-        t = utc(datetime.fromtimestamp(start, timezone.utc))
-        for i, s in enumerate(series):
-            if previous is not None and start - previous > GAP:
-                s["points"].append({"t": utc(datetime.fromtimestamp(previous + BUCKET, timezone.utc)), "v": None})
-            v = buckets[start][i]
-            s["points"].append({"t": t, "v": None if v is None else round(v, 1)})
-        previous = start
+    per = {}             # identity -> {bucket start: [5h, 7d]}
+    newest = None
+    for f in fleet.histories():
+        rows = f.db.execute("SELECT rate_limits_observed_at AS t, five_hour_pct, seven_day_pct, %s AS account_uuid "
+                            "FROM snapshots WHERE rate_limits_observed_at >= ? ORDER BY rate_limits_observed_at"
+                            % ("account_uuid" if f.schema >= ACCOUNT_SCHEMA else "NULL"), (since,)).fetchall()
+        for r in rows:
+            try:
+                ts = datetime.fromisoformat(r["t"].replace("Z", "+00:00")).timestamp()
+            except (AttributeError, ValueError):
+                continue
+            buckets = per.setdefault(fleet.identity(f, r["account_uuid"]), {})
+            b = buckets.setdefault(int(ts // BUCKET) * BUCKET, [None, None])
+            for i, v in enumerate((r["five_hour_pct"], r["seven_day_pct"])):
+                if v is not None and (b[i] is None or v > b[i]):
+                    b[i] = v
+        if rows and (newest is None or rows[-1]["t"] > newest):
+            newest = rows[-1]["t"]
+    if not fleet.several:
+        merged = {}
+        for buckets in per.values():
+            merged.update(buckets)
+        five, seven = _series(merged)
+        series = [{"name": "5h", "points": five}, {"name": "7d", "points": seven}]
+    else:
+        series = []
+        for ident in sorted(per, key=lambda i: fleet.label.get(i, i)):
+            five, seven = _series(per[ident])
+            name = fleet.label.get(ident, ident)
+            series += [{"name": "5h · %s" % name, "points": five}, {"name": "7d · %s" % name, "points": seven}]
+        if not series:
+            series = [{"name": "5h", "points": []}, {"name": "7d", "points": []}]
     result = {"kind": "timeseries", "data": {"unit": "%", "series": series}}
-    if rows:
-        result["as_of"] = rows[-1]["t"]
-    out(result)
+    if newest:
+        result["as_of"] = newest
+    emit(result, fleet)
 
 
-WIDGETS = {"sessions": sessions, "projects": projects, "quota-history": quota_history}
+WIDGETS = {"sessions": sessions, "projects": projects, "quota-history": quota_history,
+           "accounts": accounts}
 
 
 def main(argv):
     cmd = argv[1:]
     if cmd == ["detect"]:
         return detect()
-    if cmd[:1] == ["fetch"] and len(cmd) == 2 and cmd[1] in ("five-hour", "seven-day"):
-        return quota(cmd[1].replace("-", "_"))
-    if (cmd[:1] == ["fetch"] and len(cmd) == 2 and cmd[1] in WIDGETS) or \
-            (cmd[:2] == ["show", "session"] and len(cmd) == 3):
-        path = history.db_path()
-        if path is None or not os.path.isfile(path):
+    quotas = cmd[:1] == ["fetch"] and len(cmd) == 2 and cmd[1] in ("five-hour", "seven-day")
+    reads = (cmd[:1] == ["fetch"] and len(cmd) == 2 and cmd[1] in WIDGETS) or \
+        (cmd[:2] == ["show", "session"] and len(cmd) == 3)
+    if not quotas and not reads:
+        print("unknown command: %s" % " ".join(cmd), file=sys.stderr)
+        sys.exit(2)
+    fleet = Fleet()
+    try:
+        if quotas:
+            return quota(fleet, cmd[1].replace("-", "_"))
+        if not fleet.histories() and cmd[1] != "accounts":
             print("no history to read; run detect", file=sys.stderr)
             sys.exit(1)
-        db = connect(path)
-        try:
-            return WIDGETS[cmd[1]](db) if cmd[0] == "fetch" else show_session(db, cmd[2])
-        finally:
-            db.close()
-    print("unknown command: %s" % " ".join(cmd), file=sys.stderr)
-    sys.exit(2)
+        return WIDGETS[cmd[1]](fleet) if cmd[0] == "fetch" else show_session(fleet, cmd[2])
+    finally:
+        fleet.close()
 
 
 if __name__ == "__main__":
