@@ -4265,8 +4265,8 @@ hsacc() { # own-folder dirs... -> "${HSCMD[@]}" with that folder as its own and 
     TOOLWORKS_CLAUDE_DIRS="$dirs" bounded 20 "$HS" "${HSCMD[@]}"
 }
 for w in accounts quota-history sessions projects five-hour; do
-  HSCMD=(fetch $w); hsacc home "$HSA/home" "$HSA/work" "$HSA/old" > "$HSA/$w.json" 2> "$HSA/$w.err"
-  HSCMD=(fetch $w); hsacc one "$HSA/one" > "$HSA/one-$w.json" 2> "$HSA/one-$w.err"
+  HSCMD=(fetch "$w"); hsacc home "$HSA/home" "$HSA/work" "$HSA/old" > "$HSA/$w.json" 2> "$HSA/$w.err"
+  HSCMD=(fetch "$w"); hsacc one "$HSA/one" > "$HSA/one-$w.json" 2> "$HSA/one-$w.err"
 done
 HSCMD=(show session 22222222-1111-4222-8333-444444444444); hsacc home "$HSA/home" "$HSA/work" "$HSA/old" > "$HSA/show.json" 2> "$HSA/show.err"
 HSCMD=(fetch sessions); hsacc home > "$HSA/home-alone-sessions.json" 2> "$HSA/home-alone.err"
