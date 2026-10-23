@@ -30,8 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import advise as A  # noqa: E402
 import machine as M  # noqa: E402
 import report as R  # noqa: E402
-from transcripts import (Fleet, quantile, tokenizer_name,  # noqa: E402
-                         tool_version, transcript_dir)
+from transcripts import (Fleet, quantile, root_hint,  # noqa: E402
+                         tokenizer_name, tool_version, where)
 
 # Bump on ANY change to a field name, a field type, or the MEANING of a value.
 # Schema 3: `saving_pct` became nullable and gained `locates_pct` and
@@ -194,13 +194,15 @@ def main(argv=None) -> int:
     ap.add_argument("--show", action="store_true",
                     help="print it to the terminal instead of writing a file")
     ap.add_argument("--out", help="write here (default ./ts-profile.json)")
-    ap.add_argument("--root", help="transcript root")
+    ap.add_argument("--root", action="append",
+                    help="transcript root; repeat to read several")
     args = ap.parse_args(argv)
 
     fleet = Fleet.load(root=args.root)
     if not fleet.turns():
         sys.stderr.write("no usable transcripts found under %s\n"
-                         % (args.root or transcript_dir()))
+                         % where(fleet.roots))
+        sys.stderr.write(root_hint(args.root))
         return 1
     profile = build(fleet, M.collect())
     text = json.dumps(profile, indent=1, sort_keys=True)

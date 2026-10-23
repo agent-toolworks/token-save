@@ -157,6 +157,8 @@ missing tokenizer becomes an estimate, a missing tool becomes an `absent` row.
 
 ## Where transcripts come from
 
-`ts` reads `~/.claude/projects/*/*.jsonl`. Override with `--root` or
-`TS_TRANSCRIPT_DIR`. It never sends anything anywhere — all analysis is local,
-and the tool has no network code at all.
+`ts` reads `$CLAUDE_CONFIG_DIR/projects` (else `~/.claude/projects`), at any
+depth. Override with `--root` or `TS_TRANSCRIPT_DIR`; repeat `--root` (or
+separate `TS_TRANSCRIPT_DIR` with `:`) to read several config dirs in one run.
+It never sends anything anywhere — all analysis is local, and the tool has no
+network code at all.

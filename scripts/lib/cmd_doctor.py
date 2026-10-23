@@ -20,7 +20,7 @@ import machine  # noqa: E402
 import report as R  # noqa: E402
 from transcripts import (Fleet, find_sessions, tool_version,  # noqa: E402
                          find_transcripts, quantile, tokenizer_name,
-                         transcript_dir)
+                         transcript_roots, transcript_source)
 
 HOME = os.path.expanduser("~")
 
@@ -35,11 +35,16 @@ def _environment() -> str:
     out.append(R.kv("tokenizer", tokenizer_name(),
                     "" if "tiktoken" in tokenizer_name()
                     else "pip install tiktoken for exact counts"))
-    # Not CLAUDE_HOME + "/projects": the transcript root is TS_TRANSCRIPT_DIR,
-    # which moves independently of CLAUDE_CONFIG_DIR. `doctor` exists to say
-    # which paths are in effect, so naming one that is not is the worst place
-    # for this mistake.
-    out.append(R.kv("transcripts", _short(transcript_dir())))
+    # Not CLAUDE_HOME + "/projects": TS_TRANSCRIPT_DIR outranks it and moves
+    # independently of CLAUDE_CONFIG_DIR. `doctor` exists to say which paths
+    # are in effect, so naming one that is not is the worst place for this
+    # mistake -- and it says which setting chose them (#50).
+    src = {"TS_TRANSCRIPT_DIR": "from TS_TRANSCRIPT_DIR",
+           "CLAUDE_CONFIG_DIR": "from $CLAUDE_CONFIG_DIR/projects",
+           "default": "the default"}[transcript_source()]
+    for i, r in enumerate(transcript_roots()):
+        out.append(R.kv("transcripts" if i == 0 else "", _short(r),
+                        src if i == 0 else ""))
     # Both populations, named. "transcripts found" was one number covering
     # two things, which is the conflation that produced #8, #16 and #22.
     all_paths = find_transcripts()
@@ -91,7 +96,7 @@ def _nothing_found_hint() -> str:
     """The last line carrying the #20 defect: it advised setting the variable
     that was already set and already used. Same shape as the original bug, in
     the one place that did not get updated with the rest."""
-    if os.environ.get("TS_TRANSCRIPT_DIR"):
+    if transcript_source() == "TS_TRANSCRIPT_DIR":
         return "nothing to audit — that is TS_TRANSCRIPT_DIR, which is set"
     return "nothing to audit — set TS_TRANSCRIPT_DIR if yours live elsewhere"
 
