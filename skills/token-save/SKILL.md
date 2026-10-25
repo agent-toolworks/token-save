@@ -54,6 +54,7 @@ Every recommendation `ts advise` makes is ranked by this, not by raw size.
 | Where did my tokens go? | `ts audit` |
 | ...for one project only | `ts audit --project '*myrepo*'` |
 | ...the heaviest sessions | `ts audit --sessions` |
+| ...per project, with the MCP servers, skills and commands each used | `ts audit --projects` (`--json` has them as `projects`) |
 | What is installed and configured here? | `ts doctor` |
 | Just the preamble sources | `ts doctor --memory` |
 | What should I actually change? | `ts advise` |

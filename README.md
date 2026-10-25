@@ -61,6 +61,7 @@ Nothing is sent anywhere. There is no network code in this repository.
 | Where did my tokens go? | `ts audit` |
 | ...one project only | `ts audit --project '*myrepo*'` |
 | ...heaviest sessions | `ts audit --sessions` |
+| ...per project, and what each one called | `ts audit --projects` |
 | What is installed and configured here? | `ts doctor` |
 | What fills my preamble? | `ts doctor --memory` |
 | What should I change? | `ts advise` |

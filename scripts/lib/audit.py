@@ -6,7 +6,7 @@ billed for, how much was NEW work and how much was re-reading what was already
 there? That ratio is the amplification factor, and it is the number every
 recommendation in `ts advise` is ranked by.
 
-Usage: audit.py [--project GLOB] [--limit N] [--sessions] [--root DIR]... [--json]
+Usage: audit.py [--project GLOB] [--limit N] [--sessions] [--projects] [--root DIR]... [--json]
 """
 from __future__ import annotations
 
@@ -235,6 +235,58 @@ def _roots_block(fleet: Fleet) -> str:
     return "\n".join(out)
 
 
+def _tail(s: str, n: int) -> str:
+    """The end of a path, which is the part that names it."""
+    return s if len(s) <= n else "…" + s[-(n - 1):]
+
+
+def _used(d: dict, sessions: int, limit: int = 6) -> str:
+    """``alpha 3/40 (12 calls)``: sessions that used it, then calls."""
+    items = sorted(d.items(), key=lambda kv: (-kv[1]["sessions"],
+                                              -kv[1]["calls"], kv[0]))
+    out = ["%s %d/%d (%s)" % (n, v["sessions"], sessions,
+                              "1 call" if v["calls"] == 1
+                              else "{:,} calls".format(v["calls"]))
+           for n, v in items[:limit]]
+    if len(items) > limit:
+        out.append("+%d more" % (len(items) - limit))
+    return ", ".join(out)
+
+
+def _projects_block(fleet: Fleet, detail: bool = False, limit: int = 12) -> str:
+    """Which project cost what, and with ``detail`` what each one called.
+    Without ``detail``, only with more than one project: with one, its row
+    is the totals above."""
+    projects = fleet.by_project()
+    if len(projects) < 2 and not detail:
+        return ""
+    total = fleet.cost_units()
+    shown = projects if detail else projects[:limit]
+    rows = [[_tail(_short(p["cwd"] or p["project"]), 40), "{:,}".format(p["sessions"]),
+             "{:,}".format(p["turns"]), human(p["cost_units"]),
+             "%.1f%%" % pct(p["cost_units"], total),
+             "{:,}".format(len(p["mcp_servers"])), "{:,}".format(len(p["skills"]))]
+            for p in shown]
+    out = [R.heading("BY PROJECT")]
+    out.append(R.table(rows, ["project", "sessions", "turns", "cost", "share",
+                              "mcp servers", "skills"], "lrrrrrr"))
+    if len(projects) > len(shown):
+        out.append("  " + R.dim("+%d more; --projects lists every one, with "
+                                "what it called" % (len(projects) - len(shown))))
+    if not detail:
+        return "\n".join(out)
+    out.append("  " + R.dim("name sessions-that-used-it/sessions (calls); a "
+                            "subagent's calls count towards its session"))
+    for p in projects:
+        out.append("")
+        out.append("  " + R.bold(_short(p["cwd"] or p["project"])))
+        for label, key in (("mcp", "mcp_servers"), ("skills", "skills"),
+                           ("bash", "commands"), ("tools", "tools")):
+            if p[key]:
+                out.append(R.kv(label, _used(p[key], p["sessions"]), width=6))
+    return "\n".join(out)
+
+
 def _sessions_block(fleet: Fleet, limit: int = 12) -> str:
     subs = sorted(fleet.substantive(), key=lambda s: -s.cost_units)[:limit]
     # A session id says nothing about which config dir it came from, so with
@@ -280,6 +332,8 @@ def _as_json(fleet: Fleet) -> str:
             "root": r, "sessions": n, "subagent_transcripts": subs,
             "turns": turns, "billed": billed, "cost_units": round(cost, 1),
         } for r, n, subs, turns, billed, cost in fleet.by_root()],
+        "projects": [dict(p, cost_units=round(p["cost_units"], 1))
+                     for p in fleet.by_project()],
         "session_shape": {
             "turns_median": quantile(turns, 0.5),
             "turns_p90": quantile(turns, 0.9),
@@ -310,6 +364,9 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=positive_int,
                     help="only the N most recent sessions")
     ap.add_argument("--sessions", action="store_true", help="per-session table")
+    ap.add_argument("--projects", action="store_true",
+                    help="every project, with the MCP servers, skills, shell "
+                         "commands and tools it called")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--root", action="append",
                     help="transcript root (default $CLAUDE_CONFIG_DIR/projects, "
@@ -357,6 +414,9 @@ def main(argv=None) -> int:
     roots = _roots_block(fleet)
     if roots:
         print(roots)
+    projects = _projects_block(fleet, detail=args.projects)
+    if projects:
+        print(projects)
     shape = _shape_block(fleet)
     if shape:
         print(shape)

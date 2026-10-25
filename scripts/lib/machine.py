@@ -228,17 +228,33 @@ def skills_footprint() -> dict:
 
 
 def mcp_servers() -> dict:
-    """Configured MCP servers, global and per-project."""
+    """Configured MCP servers, global and per-project.
+
+    ``project_files`` is what each known project's own ``.mcp.json`` names,
+    less the ones that project turned down. Kept apart from ``projects``
+    (the servers ~/.claude.json scopes to a project) so the machine-wide
+    counts read as before; mcp-schema checks both against what each project
+    actually called (#54).
+    """
     cfg = _read_json(CLAUDE_JSON)
     if cfg is None:
-        return {"readable": False, "global": [], "projects": {}}
+        return {"readable": False, "global": [], "projects": {},
+                "project_files": {}}
     g = list((cfg.get("mcpServers") or {}).keys())
-    projects = {}
+    projects, files = {}, {}
     for proj, v in (cfg.get("projects") or {}).items():
-        names = list(((v or {}).get("mcpServers") or {}).keys())
+        v = v if isinstance(v, dict) else {}
+        names = list((v.get("mcpServers") or {}).keys())
         if names:
             projects[proj] = names
-    return {"readable": True, "global": g, "projects": projects}
+        mcpjson = _read_json(os.path.join(proj, ".mcp.json"))
+        if isinstance(mcpjson, dict) and isinstance(mcpjson.get("mcpServers"), dict):
+            off = set(v.get("disabledMcpjsonServers") or [])
+            names = [n for n in mcpjson["mcpServers"] if n not in off]
+            if names:
+                files[proj] = names
+    return {"readable": True, "global": g, "projects": projects,
+            "project_files": files}
 
 
 def settings() -> dict:
