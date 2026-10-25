@@ -976,13 +976,30 @@ def d_mcp_schema(fleet, mach):
     # URL turns it off, which is exactly the case a proxy user lands in.
     at_risk = bool(base_url) and tool_search in (None, "", "false", "0", "off")
     unused = sorted(n for n in configured if n not in called)
-    if not at_risk and not unused:
+    # Machine-wide, a server one project calls every day and another never
+    # does reads as used. Each project that names servers of its own --
+    # scoped to it in ~/.claude.json, or in its .mcp.json -- is checked
+    # against what that project called (#54).
+    scoped = {}
+    for src in (mcp["projects"], mcp.get("project_files") or {}):
+        for proj, names in src.items():
+            scoped.setdefault(os.path.normpath(proj), set()).update(names)
+    dead_here = []
+    for proj in fleet.by_project():
+        names = scoped.get(os.path.normpath(proj["cwd"])) if proj["cwd"] else None
+        dead = sorted(n for n in names or () if n not in proj["mcp_servers"])
+        if dead and proj["sessions"]:
+            dead_here.append((proj["cwd"], proj["sessions"], dead))
+    if not at_risk and not unused and not dead_here:
         return None
 
     conds = [Cond("tool deferral off behind a custom base URL", at_risk, None,
                   mode="flag")]
     if unused:
         conds.append(Cond("configured MCP servers never called", len(unused), 1))
+    if dead_here:
+        conds.append(Cond("projects with their own MCP servers they never call",
+                          len(dead_here), 1))
     gate = Gate("any", conds)
 
     ev = ["{} MCP server(s) configured ({} global, {} project-scoped); "
@@ -995,6 +1012,15 @@ def d_mcp_schema(fleet, mach):
     for proj, names in list(mcp["projects"].items())[:4]:
         ev.append("    {}: {}".format(
             os.path.basename(proj.rstrip("/")), ", ".join(names)))
+    if dead_here:
+        ev.append("configured for a project and never called in it:")
+        for cwd, n, dead in dead_here[:6]:
+            ev.append("    {} ({} session{} read): {}".format(
+                os.path.basename(cwd.rstrip("/")) or cwd, n,
+                "" if n == 1 else "s", ", ".join(dead[:6])
+                + ("" if len(dead) <= 6 else " (+%d more)" % (len(dead) - 6))))
+        if len(dead_here) > 6:
+            ev.append("    (+%d more projects)" % (len(dead_here) - 6))
 
     if at_risk:
         # Estimate from this machine's own tool surface rather than a constant.
@@ -1029,11 +1055,13 @@ def d_mcp_schema(fleet, mach):
     ev.append("tool deferral is on, so these definitions are NOT in every "
               "preamble — the cost of an unused server is small, and no "
               "number is claimed for it here")
-    ev.append("never called in the transcripts read: " + ", ".join(unused[:8])
-              + ("" if len(unused) <= 8 else " (+%d more)" % (len(unused) - 8)))
+    if unused:
+        ev.append("never called in the transcripts read: " + ", ".join(unused[:8])
+                  + ("" if len(unused) <= 8 else " (+%d more)" % (len(unused) - 8)))
     return Finding(
         id="mcp-schema",
-        title="Configured MCP servers you never call",
+        title=("Configured MCP servers you never call" if unused
+               else "Project MCP servers the project never calls"),
         severity="low", confidence="derived",
         # Deferral is on, so the evidence above says the cost of an unused
         # server is small. No saving claimed, and nothing material located --
@@ -1042,9 +1070,10 @@ def d_mcp_schema(fleet, mach):
         gate=gate,
         evidence=ev,
         actions=[
-            "Remove the servers above from ~/.claude.json if you do not want "
-            "them. Under deferral this is hygiene rather than a saving: their "
-            "definitions are not loaded up front, only indexed.",
+            "Remove the servers above from ~/.claude.json, or from the "
+            "project's .mcp.json, if you do not want them. Under deferral this "
+            "is hygiene rather than a saving: their definitions are not loaded "
+            "up front, only indexed.",
         ])
 
 

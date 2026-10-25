@@ -1848,6 +1848,125 @@ MULTIROOT
 [[ $multiroot == CLEAR ]] && ok "several transcript roots are read in one run and broken down per root (#50)" \
                           || bad "multi-root reading wrong" "${multiroot//|/$'\n        '}"
 
+# #54: per project, what it cost and what it called -- MCP calls rolled up by
+# server, Skill calls by skill, Bash calls by program -- with the sessions that
+# used each, a subagent's calls counted towards its own session. And advise
+# says in which project a project-scoped server goes uncalled, which the
+# machine-wide check cannot: alpha is called in projA, so it reads as used.
+perproject=$(python3 - "$TMP" "$ROOT" <<'PERPROJECT'
+import json, os, subprocess, sys
+
+tmp, root = sys.argv[1], sys.argv[2]
+ts = os.path.join(root, "scripts", "ts")
+base = os.path.join(tmp, "perproject")
+work = {k: os.path.join(base, "work", k) for k in ("projA", "projB")}
+bad = []
+
+def tool(cwd, mid, name, inp):
+    return [{"type": "assistant", "cwd": cwd, "message": {
+                "id": mid, "role": "assistant",
+                "usage": {"input_tokens": 10, "output_tokens": 5,
+                          "cache_read_input_tokens": 100,
+                          "cache_creation_input_tokens": 20},
+                "content": [{"type": "tool_use", "id": "t" + mid,
+                             "name": name, "input": inp}]}},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t" + mid,
+                 "content": "ok"}]}}]
+
+def write(path, *calls):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        for rec in [r for c in calls for r in c]:
+            fh.write(json.dumps(rec) + "\n")
+
+A, B = os.path.join(base, "cfgA"), os.path.join(base, "cfgB")
+a, b = work["projA"], work["projB"]
+dirA, dirB = "-perproject-projA", "-perproject-projB"
+write(os.path.join(A, dirA, "s1.jsonl"),
+      tool(a, "1", "mcp__alpha__ping", {}), tool(a, "2", "mcp__alpha__pong", {}),
+      tool(a, "3", "Skill", {"skill": "dataviz"}))
+write(os.path.join(A, dirA, "s2.jsonl"),
+      tool(a, "1", "Bash", {"command": "cd /x && gh pr list"}))
+write(os.path.join(A, dirA, "s2", "subagents", "agent-1.jsonl"),
+      tool(a, "1", "mcp__alpha__ping", {}))
+write(os.path.join(B, dirB, "s3.jsonl"), tool(b, "1", "Bash", {"command": "gh --version"}))
+write(os.path.join(B, dirA, "s4.jsonl"), tool(a, "1", "Read", {"file_path": "/x"}))
+
+r = subprocess.run([ts, "audit", "--json", "--root", A, "--root", B],
+                   capture_output=True, text=True)
+try:
+    got = json.loads(r.stdout)
+except ValueError:
+    got = None
+    bad.append("audit --json over two projects failed: %r" % r.stderr[:120])
+if got:
+    per = {p["project"]: p for p in got.get("projects", [])}
+    if sorted(per) != [dirA, dirB]:
+        bad.append("projects are not one entry per directory: %r" % sorted(per))
+    elif [p["project"] for p in got["projects"]] != [dirA, dirB]:
+        bad.append("projects are not costliest first")
+    else:
+        pa, pb = per[dirA], per[dirB]
+        for k in got["billed"]:
+            if pa["billed"][k] + pb["billed"][k] != got["billed"][k]:
+                bad.append("billed.%s is not the sum of the projects" % k)
+        if (pa["sessions"], pa["subagent_transcripts"], pb["sessions"]) != (3, 1, 1):
+            bad.append("session counts per project are %r"
+                       % [(p["sessions"], p["subagent_transcripts"]) for p in (pa, pb)])
+        if pa["roots"] != [A, B] or pb["roots"] != [B]:
+            bad.append("a project does not list the roots it was found under")
+        if pa["cwd"] != a:
+            bad.append("the project's cwd is %r" % pa["cwd"])
+        want = {"mcp_servers": {"alpha": {"calls": 3, "sessions": 2}},
+                "skills": {"dataviz": {"calls": 1, "sessions": 1}},
+                "commands": {"gh": {"calls": 1, "sessions": 1}}}
+        for k, v in want.items():
+            if pa[k] != v:
+                bad.append("projA %s is %r, not %r" % (k, pa[k], v))
+        if "mcp__alpha__ping" in pa["tools"] or "Read" not in pa["tools"]:
+            bad.append("tools are not the non-MCP tool names: %r" % pa["tools"])
+        if pb["mcp_servers"] or pb["commands"] != {"gh": {"calls": 1, "sessions": 1}}:
+            bad.append("projB carries another project's calls")
+
+r = subprocess.run([ts, "audit", "--root", A, "--root", B, "--projects"],
+                   capture_output=True, text=True)
+if "BY PROJECT" not in r.stdout or "alpha 2/3 (3 calls)" not in r.stdout:
+    bad.append("audit --projects does not print what each project called")
+r = subprocess.run([ts, "audit", "--root", B, "--project=" + dirB],
+                   capture_output=True, text=True)
+if "BY PROJECT" in r.stdout:
+    bad.append("a single project prints a per-project breakdown of one row")
+
+cfg = os.path.join(base, "home")
+for d in (cfg, a, b):
+    os.makedirs(d, exist_ok=True)
+with open(os.path.join(a, ".mcp.json"), "w") as fh:
+    json.dump({"mcpServers": {"alpha": {}, "beta": {}, "gamma": {}}}, fh)
+with open(os.path.join(cfg, ".claude.json"), "w") as fh:
+    json.dump({"projects": {a: {"disabledMcpjsonServers": ["gamma"]},
+                            b: {"mcpServers": {"delta": {}}}}}, fh)
+r = subprocess.run([ts, "advise", "--json", "--root", A, "--root", B],
+                   env=dict(os.environ, CLAUDE_CONFIG_DIR=cfg),
+                   capture_output=True, text=True)
+try:
+    found = {f["id"]: f for f in json.loads(r.stdout)["findings"]}
+except (ValueError, KeyError):
+    found = {}
+    bad.append("advise over two projects failed: %r" % r.stderr[:120])
+ev = "\n".join(found.get("mcp-schema", {}).get("evidence", []))
+if "projA (3 sessions read): beta" not in ev:
+    bad.append("an uncalled .mcp.json server is not named in its project")
+if "projB (1 session read): delta" not in ev:
+    bad.append("an uncalled ~/.claude.json project server is not named in its project")
+if "gamma" in ev or ": alpha" in ev:
+    bad.append("a disabled or called server is reported as uncalled")
+print("|".join(bad) if bad else "CLEAR")
+PERPROJECT
+)
+[[ $perproject == CLEAR ]] && ok "audit breaks down by project with tools rolled up; advise names dead MCP servers per project (#54)" \
+                           || bad "per-project breakdown wrong" "${perproject//|/$'\n        '}"
+
 # #40: a plugin install is a copy that nothing updates, and ts had no way to
 # say it was stale (#37). doctor now compares, offline, the running version
 # with the plugin cache, with what Claude Code loads, and with a marketplace

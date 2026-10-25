@@ -303,6 +303,7 @@ class Session:
     tool_out: dict = field(default_factory=dict)    # tool name -> result tokens
     tool_in: dict = field(default_factory=dict)     # tool name -> call-input tokens
     tool_calls: dict = field(default_factory=dict)  # tool name -> call count
+    skill_calls: dict = field(default_factory=dict) # Skill tool: skill name -> calls
     bash_out: list = field(default_factory=list)    # every Bash result size
     bash_cmds: list = field(default_factory=list)   # (tokens, command) per call
     reads: dict = field(default_factory=dict)       # (path, off, lim) -> [count, tokens]
@@ -322,6 +323,10 @@ class Session:
     # at instead of averaging four of them together.
     attach_types: dict = field(default_factory=dict)
     attach_counts: dict = field(default_factory=dict)
+    # The working directory the first record names. The project directory's
+    # name encodes it lossily ('/' and '.' both become '-'), so this is what
+    # matches a project to its entry in ~/.claude.json (#54).
+    cwd: str = ""
 
     @property
     def content_total(self) -> int:
@@ -360,6 +365,20 @@ class Session:
 
 def _bump(d: dict, k, n) -> None:
     d[k] = d.get(k, 0) + n
+
+
+def mcp_server_of(name) -> str:
+    """The MCP server a tool name belongs to (``mcp__<server>__<tool>``, or
+    the older single-underscore form), or "" for a tool that is not MCP."""
+    if not isinstance(name, str):
+        return ""
+    if name.startswith("mcp__"):
+        parts = name.split("__", 2)
+    elif name.startswith("mcp_"):
+        parts = name.split("_", 2)
+    else:
+        return ""
+    return parts[1] if len(parts) == 3 else ""
 
 
 def transcript_source() -> str:
@@ -791,6 +810,8 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
             except Exception:
                 continue
             kind = rec.get("type")
+            if not s.cwd and isinstance(rec.get("cwd"), str):
+                s.cwd = rec["cwd"]
 
             if kind == "attachment":
                 if not usage_only:
@@ -877,6 +898,9 @@ def parse(path: str, usage_only: bool = False, root: str = None) -> Session:
                                 _bump(s.tool_calls, name, 1)
                                 if name == "Bash":
                                     s.bash_cmds.append((n, str(inp.get("command", ""))))
+                                elif name == "Skill" and isinstance(inp, dict):
+                                    _bump(s.skill_calls,
+                                          str(inp.get("skill") or "?"), 1)
                     except Exception:
                         # A per-line try/except around json.loads() makes this
                         # loop robust against malformed JSON and nothing else.
@@ -1013,6 +1037,68 @@ class Fleet:
                         sum(s.cost_units for s in mine)))
         return out
 
+    def by_project(self) -> list:
+        """Per project directory, costliest first: the same denominators as
+        by_root(), plus what the project called, rolled up -- MCP tools by
+        server, Skill calls by skill, Bash calls by program -- each as
+        {name: {"calls", "sessions"}} so "used in 3 of 40 sessions" can be
+        told from "called 3 times in one" (#54).
+
+        Keyed by the directory's name, not by (root, name): two accounts that
+        worked in the same directory worked in the same project, and the
+        entry lists every root it was found under. A subagent's calls count
+        towards the session that started it."""
+        groups = {}
+        for s in self.sessions:
+            groups.setdefault(s.project, []).append(s)
+        out = []
+        for project, mine in groups.items():
+            billed = dict(cache_read=0, cache_write=0, input=0, output=0)
+            for s in mine:
+                for k in billed:
+                    billed[k] += s.billed[k]
+            used = {"tools": {}, "mcp_servers": {}, "skills": {},
+                    "commands": {}}
+            seen = {k: {} for k in used}
+
+            def count(kind, name, n, sid):
+                cur = used[kind].setdefault(name, {"calls": 0, "sessions": 0})
+                cur["calls"] += n
+                if sid not in seen[kind].setdefault(name, set()):
+                    seen[kind][name].add(sid)
+                    cur["sessions"] += 1
+
+            for s in mine:
+                sid = (s.root, (parent_session_of(s.path, s.root)
+                                if s.is_subagent else None) or s.session_id)
+                for name, n in s.tool_calls.items():
+                    server = mcp_server_of(name)
+                    count("mcp_servers" if server else "tools",
+                          server or name, n, sid)
+                for name, n in s.skill_calls.items():
+                    count("skills", name, n, sid)
+                for _n, cmd in s.bash_cmds:
+                    count("commands", command_program(cmd), 1, sid)
+            # The latest main session's directory: a renamed checkout keeps
+            # its old project directory, and the newest record is the one
+            # that names where it lives now.
+            mains = sorted((s for s in mine if not s.is_subagent and s.cwd),
+                           key=lambda s: s.mtime)
+            cwds = mains or [s for s in mine if s.cwd]
+            out.append(dict(
+                project=project,
+                cwd=cwds[-1].cwd if cwds else "",
+                roots=[r for r in self.roots if any(s.root == r for s in mine)]
+                      or sorted({s.root for s in mine}),
+                sessions=sum(1 for s in mine if not s.is_subagent),
+                subagent_transcripts=sum(1 for s in mine if s.is_subagent),
+                turns=sum(s.turns for s in mine),
+                billed=billed,
+                cost_units=sum(s.cost_units for s in mine),
+                **used))
+        out.sort(key=lambda p: (-p["cost_units"], p["project"]))
+        return out
+
     # -- aggregates ---------------------------------------------------------
     def billed(self) -> dict:
         out = dict(cache_read=0, cache_write=0, input=0, output=0)
@@ -1063,16 +1149,9 @@ class Fleet:
         out = set()
         for sess in self.sessions:
             for name in sess.tool_calls:
-                if not isinstance(name, str):
-                    continue
-                if name.startswith("mcp__"):
-                    parts = name.split("__", 2)
-                    if len(parts) == 3 and parts[1]:
-                        out.add(parts[1])
-                elif name.startswith("mcp_"):
-                    parts = name.split("_", 2)
-                    if len(parts) == 3 and parts[1]:
-                        out.add(parts[1])
+                server = mcp_server_of(name)
+                if server:
+                    out.add(server)
         return out
 
     def skipped(self) -> int:
